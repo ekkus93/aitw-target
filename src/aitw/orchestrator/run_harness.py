@@ -26,6 +26,7 @@ from aitw.agent.loop import AgentLoop
 from aitw.agent.profile import AgentProfile
 from aitw.context.store import ContextStore
 from aitw.logging.observation_log import ObservationLog
+from aitw.safety.paths import resolve_under
 from aitw.scenarios.base import RunArtifacts, Scenario
 from aitw.tools.registry import ToolContext, default_registry
 
@@ -57,13 +58,7 @@ def _validate_run_id(run_id: str) -> str:
     return run_id
 
 
-def _assert_within(root: Path, child: Path) -> Path:
-    """Defense in depth: assert child resolves to root itself or a path under it."""
-    root_r = root.resolve()
-    child_r = child.resolve()
-    if child_r != root_r and not child_r.is_relative_to(root_r):
-        raise ValueError(f"path {child} escapes runs_dir {root}")
-    return child_r
+# Path containment lives in aitw.safety.paths.resolve_under (shared chokepoint).
 
 
 @dataclass
@@ -159,8 +154,8 @@ def run(
     runs_dir = Path(runs_dir)
     log_path = runs_dir / f"{run_id}.run.jsonl"
     workspace = runs_dir / run_id / "workspace"
-    _assert_within(runs_dir, log_path)
-    _assert_within(runs_dir, workspace)
+    resolve_under(runs_dir, log_path)
+    resolve_under(runs_dir, workspace)
     workspace.mkdir(parents=True, exist_ok=True)
 
     store = ContextStore(":memory:")
