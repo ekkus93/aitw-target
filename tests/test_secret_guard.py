@@ -12,6 +12,8 @@ appears contiguously in this (tracked, scanned) source file.
 
 from pathlib import Path
 
+import pytest
+
 from aitw.safety import secret_guard
 
 
@@ -66,6 +68,39 @@ def test_repo_scan_is_clean():
     findings, scanned = secret_guard.scan_repo()
     assert findings == {}, f"repo is not clean: {findings}"
     assert scanned > 0
+
+
+# --- local pattern file must FAIL CLOSED when present-but-unloadable (P1.11) -------------------
+
+
+def test_local_pattern_parse_failure_fails_closed(monkeypatch, tmp_path):
+    bad = tmp_path / "secret_guard_local.yaml"
+    bad.write_text("extra_disallowed_patterns: [unclosed\n", encoding="utf-8")  # invalid YAML
+    monkeypatch.setattr(secret_guard, "LOCAL_PATTERN_FILE", bad)
+    with pytest.raises(secret_guard.LocalPatternError):
+        secret_guard.load_local_patterns()
+
+
+def test_local_pattern_non_mapping_fails_closed(monkeypatch, tmp_path):
+    bad = tmp_path / "secret_guard_local.yaml"
+    bad.write_text("- just\n- a\n- list\n", encoding="utf-8")
+    monkeypatch.setattr(secret_guard, "LOCAL_PATTERN_FILE", bad)
+    with pytest.raises(secret_guard.LocalPatternError):
+        secret_guard.load_local_patterns()
+
+
+def test_main_returns_nonzero_when_local_patterns_fail_closed(monkeypatch, tmp_path):
+    bad = tmp_path / "secret_guard_local.yaml"
+    bad.write_text(": : :\n", encoding="utf-8")
+    monkeypatch.setattr(secret_guard, "LOCAL_PATTERN_FILE", bad)
+    assert secret_guard.main() == 1
+
+
+def test_valid_local_pattern_file_loads(monkeypatch, tmp_path):
+    good = tmp_path / "secret_guard_local.yaml"
+    good.write_text("extra_disallowed_patterns:\n  - 'CODENAME-[0-9]+'\n", encoding="utf-8")
+    monkeypatch.setattr(secret_guard, "LOCAL_PATTERN_FILE", good)
+    assert secret_guard.load_local_patterns() == ["CODENAME-[0-9]+"]
 
 
 # --- suppression marker is restricted to approved paths (P0.5) --------------------------------

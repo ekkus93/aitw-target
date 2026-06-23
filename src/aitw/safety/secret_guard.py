@@ -115,8 +115,18 @@ def scan_text(text, extra_compiled=()):
     return violations
 
 
+class LocalPatternError(RuntimeError):
+    """The local pattern file exists but cannot be loaded — the guard must FAIL CLOSED."""
+
+
 def load_local_patterns():
-    """Load extra IP-tell regexes from the gitignored local file. LOUD if absent."""
+    """Load extra IP-tell regexes from the gitignored local file.
+
+    Absent file → LOUD notice, generic patterns only (the documented CI/fresh-clone case).
+    Present-but-unloadable file → FAIL CLOSED (FIX2 P1.11 / §13.2): if PyYAML is unavailable, the
+    file does not parse, or it is not a mapping, raise rather than silently skipping the private
+    patterns — skipping them would let an IP-tell slip through unnoticed.
+    """
     if not LOCAL_PATTERN_FILE.exists():
         print(
             f"{LOCAL_PATTERN_FILE.name} not found — IP-codename checks skipped, "
@@ -124,10 +134,20 @@ def load_local_patterns():
             file=sys.stderr,
         )
         return []
-    if yaml is None:  # pragma: no cover
-        print("pyyaml not installed — cannot load secret_guard_local.yaml", file=sys.stderr)
-        return []
-    data = yaml.safe_load(LOCAL_PATTERN_FILE.read_text(encoding="utf-8")) or {}
+    if yaml is None:  # pragma: no cover - exercised only without pyyaml installed
+        raise LocalPatternError(
+            f"{LOCAL_PATTERN_FILE.name} is present but PyYAML is unavailable — failing closed"
+        )
+    try:
+        data = yaml.safe_load(LOCAL_PATTERN_FILE.read_text(encoding="utf-8")) or {}
+    except yaml.YAMLError as exc:
+        raise LocalPatternError(
+            f"{LOCAL_PATTERN_FILE.name} failed to parse — failing closed: {exc}"
+        ) from exc
+    if not isinstance(data, dict):
+        raise LocalPatternError(
+            f"{LOCAL_PATTERN_FILE.name} must be a mapping — failing closed"
+        )
     return list(data.get("extra_disallowed_patterns", []))
 
 
@@ -201,7 +221,11 @@ def scan_repo():
 
 
 def main(argv=None):
-    findings, scanned = scan_repo()
+    try:
+        findings, scanned = scan_repo()
+    except LocalPatternError as exc:
+        print(f"\n❌ secret guard FAILED — {exc}\n", file=sys.stderr)
+        return 1
     if findings:
         print("\n❌ secret guard FAILED — disallowed patterns in tracked files:\n", file=sys.stderr)
         labels = set()

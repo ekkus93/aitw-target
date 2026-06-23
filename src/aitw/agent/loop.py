@@ -8,10 +8,12 @@ the orchestrator log every step (the observation log is wired in the run harness
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass, field
 from typing import Callable, Protocol
 
 from aitw.agent.adapters.base import Message, ModelAdapter
+from aitw.safety.limits import MAX_MODEL_RESPONSE_BYTES, truncate_text
 
 
 class ToolCaller(Protocol):
@@ -41,7 +43,8 @@ class Step:
 class RunResult:
     steps: list[Step] = field(default_factory=list)
     final: str | None = None
-    outcome: str = "no_steps"  # "final" | "max_steps" | "parse_error"
+    outcome: str = "no_steps"  # "final" | "max_steps" | "parse_error" | "timeout"
+    truncation_count: int = 0  # model responses truncated by the resource cap (FIX2 P1.6)
 
 
 def _extract_json(text: str) -> dict | None:
@@ -72,10 +75,19 @@ def parse_action(raw: str) -> Action:
 
 
 class AgentLoop:
-    def __init__(self, adapter: ModelAdapter, tools: ToolCaller, max_steps: int = 8):
+    def __init__(
+        self,
+        adapter: ModelAdapter,
+        tools: ToolCaller,
+        max_steps: int = 8,
+        max_wall_clock_s: float | None = None,
+    ):
         self.adapter = adapter
         self.tools = tools
         self.max_steps = max_steps
+        # Wall-clock bound for the whole loop (FIX2 P1.8). None disables it (the deterministic
+        # mock has no reason to time out); real-model runs pass a budget from config.
+        self.max_wall_clock_s = max_wall_clock_s
 
     def run(
         self,
@@ -89,8 +101,17 @@ class AgentLoop:
             messages.append(Message("user", f"Context available to you:\n{context_blob}"))
 
         result = RunResult()
+        deadline = (
+            time.monotonic() + self.max_wall_clock_s if self.max_wall_clock_s else None
+        )
         for step_no in range(1, self.max_steps + 1):
+            if deadline is not None and time.monotonic() > deadline:
+                result.outcome = "timeout"
+                return result
             raw = self.adapter.complete(system, messages)
+            raw, marker = truncate_text(raw, MAX_MODEL_RESPONSE_BYTES)
+            if marker:
+                result.truncation_count += 1
             action = parse_action(raw)
 
             if action.tool is None and action.final is None:

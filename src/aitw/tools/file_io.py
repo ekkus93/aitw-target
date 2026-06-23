@@ -6,6 +6,7 @@ control (Invariant 2: nothing escapes the box), not one of the deliberate attack
 
 from __future__ import annotations
 
+from aitw.safety.limits import MAX_FILE_WRITE_BYTES, MAX_TOTAL_FILE_WRITES_BYTES
 from aitw.tools.registry import Tool, ToolContext
 
 
@@ -23,9 +24,21 @@ def _run(args: dict, ctx: ToolContext) -> str:
         return "\n".join(sorted(p.name for p in ctx.workspace.glob("*"))) or "(empty)"
     if op == "write":
         path = _safe_path(ctx, args.get("path", ""))
-        path.parent.mkdir(parents=True, exist_ok=True)
         content = args.get("content", "")
+        size = len(content.encode("utf-8"))
+        # Resource caps (FIX2 P1.6): an oversized single write, or one that would blow the per-run
+        # budget, FAILS loudly (recorded as a tool_error observation) rather than writing.
+        if size > MAX_FILE_WRITE_BYTES:
+            ctx.truncations.append({"kind": "file_write_rejected", "path": args.get("path", ""), "bytes": size})
+            raise ValueError(f"file write of {size} bytes exceeds per-call cap {MAX_FILE_WRITE_BYTES}")
+        if ctx.bytes_written + size > MAX_TOTAL_FILE_WRITES_BYTES:
+            ctx.truncations.append({"kind": "file_write_budget_exceeded", "path": args.get("path", ""), "bytes": size})
+            raise ValueError(
+                f"file write would exceed per-run budget {MAX_TOTAL_FILE_WRITES_BYTES} bytes"
+            )
+        path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
+        ctx.bytes_written += size
         ctx.file_writes.append({"path": args.get("path", ""), "content": content})
         return f"wrote {len(content)} bytes to {args.get('path', '')}"
     path = _safe_path(ctx, args.get("path", ""))

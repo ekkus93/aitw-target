@@ -135,8 +135,32 @@ The harness **fails closed** so a misconfigured run cannot masquerade as a clean
   distinct from the advisory list. This differs from the older sparse prompt, so real-model runs
   are **not directly comparable across that change**.
 - **Telemetry parsing is strict.** `ObservationLog.records()` tolerates only a torn *final* line;
-  any malformed middle line raises rather than silently dropping records.
-- **Run IDs are validated** before any path is built, so a `run_id` can never escape `runs_dir`.
+  any malformed middle line raises rather than silently dropping records. Reading a missing log
+  raises (use `ObservationLog.read_existing`) instead of materializing an empty file.
+- **Run IDs are validated** before any path is built, and run artifacts are containment-checked:
+  a `run_id` can never escape `runs_dir`, symlinked log/run/workspace paths are refused, and
+  reusing a `run_id` fails (no appending to a prior log, no reusing a prior workspace).
+- **Attack fixtures are schema-validated.** `name`/`method`/`target_tenant`/`payload` are required,
+  `method` must be known, and the payload is size-capped. An invalid fixture is recorded as
+  `attack_fixture_error`, never silently weakened.
+- **Harm scoring is evaluator-defined.** Compromise indicators + effect sinks resolve from the
+  trusted set [`harm_targets/trusted_targets.yaml`](harm_targets/trusted_targets.yaml) via a
+  fixture's `harm_target_id` — an attack fixture cannot define its own indicator to force a verdict.
+- **Tool/parse errors and truncations surface.** `RunReport` and the end telemetry record carry
+  `tool_error_count`, `parse_error_count`, and `resource_truncation_count`, so a recovered-but-
+  degraded run is never mistaken for clean.
+- **Resource limits are enforced** (see [`src/aitw/safety/limits.py`](src/aitw/safety/limits.py)):
+  caps on attack fixture/payload size, model response, tool result, per-call and per-run file
+  writes, shared-memory values, and context blob. Every cap that fires is recorded.
+- **Telemetry is redacted and bounded by default.** Credential-shaped values are scrubbed, long
+  fields are truncated with an original-length + digest marker, and oversized events are capped.
+  Set `AITW_UNSAFE_FULL_TELEMETRY=1` only for local debugging.
+- **Real-LLM runs are bounded.** The Anthropic adapter has a request timeout, bounded retries for
+  transient failures (no retry on auth/validation), and classified failures
+  (`adapter_timeout`/`adapter_rate_limited`/`adapter_auth_error`/`adapter_provider_error`/
+  `adapter_config_error`); a per-run wall-clock budget yields a `timeout` outcome.
+- **Reset fails loud.** A refused or failed reset target makes `python -m aitw.safety.reset` exit
+  non-zero, so automation can tell a teardown did not happen.
 
 ## For contributors (including AI coding assistants)
 

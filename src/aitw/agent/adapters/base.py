@@ -18,6 +18,25 @@ class Message:
     content: str
 
 
+# Canonical adapter failure classes (FIX2 P1.8 / §12). An adapter raises AdapterError with one of
+# these so the harness can record a specific end-telemetry outcome instead of a generic crash.
+ADAPTER_OUTCOMES = (
+    "adapter_timeout",
+    "adapter_rate_limited",
+    "adapter_auth_error",
+    "adapter_provider_error",
+    "adapter_config_error",
+)
+
+
+class AdapterError(Exception):
+    """A model-provider failure with a classification drawn from ADAPTER_OUTCOMES."""
+
+    def __init__(self, classification: str, message: str = ""):
+        self.classification = classification
+        super().__init__(message or classification)
+
+
 @runtime_checkable
 class ModelAdapter(Protocol):
     name: str

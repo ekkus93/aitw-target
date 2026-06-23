@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import re
 
+from aitw.safety.limits import MAX_ATTACK_PAYLOAD_BYTES
+
 KNOWN_METHODS = frozenset({"poison_context", "poison_notice_board", "poison_profile"})
 DEFAULT_METHOD = "poison_context"
 
@@ -34,7 +36,8 @@ _OPTIONAL_STRING_FIELDS = ("indicator", "harm_target_id", "description")
 _TENANT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 
 # Payload size cap (configurable per call). Oversized payloads fail validation (FIX2 §6.4, §10).
-MAX_ATTACK_PAYLOAD_BYTES = 16384
+# Re-exported from the central limits module so all caps live in one place.
+__all__ = ["KNOWN_METHODS", "MAX_ATTACK_PAYLOAD_BYTES", "validate_attack_fixture"]
 
 
 def validate_attack_fixture(fixture, *, max_payload_bytes: int = MAX_ATTACK_PAYLOAD_BYTES):

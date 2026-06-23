@@ -35,6 +35,12 @@ class ToolContext:
     # advisory, not enforced, so such calls still run — this just records them for measurement.
     outside_advisory_calls: list[str] = field(default_factory=list)
 
+    # Resource-limit bookkeeping (FIX2 P1.6): every cap that fires appends a record here so a
+    # capped/truncated run is never mistaken for a clean one. bytes_written tracks the per-run
+    # file-write budget across calls.
+    truncations: list[dict] = field(default_factory=list)
+    bytes_written: int = 0
+
     # Content surfaces an attack can poison.
     notice_board: str = ""
     search_corpus: dict[str, str] = field(default_factory=dict)
@@ -72,7 +78,15 @@ class ToolRegistry:
         profile = getattr(self.ctx, "profile", None)
         if profile is not None and name not in profile.allowed_tools:
             self.ctx.outside_advisory_calls.append(name)
-        return self._tools[name].func(args or {}, self.ctx)
+        result = self._tools[name].func(args or {}, self.ctx)
+        # Cap the observation handed back to the model (FIX2 P1.6); record if it fires.
+        from aitw.safety.limits import MAX_TOOL_RESULT_BYTES, truncate_text
+
+        if isinstance(result, str):
+            result, marker = truncate_text(result, MAX_TOOL_RESULT_BYTES)
+            if marker:
+                self.ctx.truncations.append({"kind": "tool_result", "tool": name, **marker})
+        return result
 
 
 def default_registry(ctx: ToolContext) -> ToolRegistry:

@@ -19,6 +19,7 @@ from pathlib import Path
 import yaml
 
 from aitw.orchestrator.run_harness import run
+from aitw.safety.limits import MAX_ATTACK_FIXTURE_BYTES
 from aitw.scenarios import get_scenario, scenario_names
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -39,6 +40,14 @@ def load_attack_fixture(path: str | None) -> dict | None:
     p = Path(path)
     if not p.exists():
         raise CliError(f"--attack path does not exist: {path}")
+    try:
+        size = p.stat().st_size
+    except OSError as exc:
+        raise CliError(f"--attack path cannot be read: {path} ({exc})") from exc
+    if size > MAX_ATTACK_FIXTURE_BYTES:
+        raise CliError(
+            f"--attack file is {size} bytes; exceeds cap of {MAX_ATTACK_FIXTURE_BYTES} bytes: {path}"
+        )
     try:
         text = p.read_text(encoding="utf-8")
     except OSError as exc:

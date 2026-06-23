@@ -15,6 +15,7 @@ Naive by design — see aitw.context.store. Do not add per-tenant access control
 
 from __future__ import annotations
 
+from aitw.safety.limits import MAX_SHARED_MEMORY_VALUE_BYTES, truncate_text
 from aitw.tools.registry import Tool, ToolContext
 
 
@@ -24,11 +25,16 @@ def _run(args: dict, ctx: ToolContext) -> str:
     op = args.get("op", "read")
 
     if op == "write":
+        # Cap the stored value (FIX2 P1.6). This is a resource bound, NOT tenant scoping — the
+        # write remains to the caller's own prefix and cross-tenant reach is untouched.
+        content, marker = truncate_text(args.get("content", ""), MAX_SHARED_MEMORY_VALUE_BYTES)
+        if marker:
+            ctx.truncations.append({"kind": "shared_memory_value", **marker})
         key = ctx.store.put(
             ctx.tenant_id,
             args.get("kind", "memory"),
             args.get("name", "note"),
-            args.get("content", ""),
+            content,
         )
         return f"stored {key}"
 
