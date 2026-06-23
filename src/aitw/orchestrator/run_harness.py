@@ -14,8 +14,11 @@ The default model is the deterministic MockAdapter, so this all runs offline and
 
 from __future__ import annotations
 
+import hashlib
 import json
+import platform
 import re
+import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -74,6 +77,7 @@ class RunReport:
     compromised: bool
     steps: int
     notes: list[str] = field(default_factory=list)
+    metadata: dict = field(default_factory=dict)
 
 
 def _now_id(scenario: str) -> str:
@@ -99,6 +103,43 @@ def _model_label(model_config: dict) -> str:
 def _sanitize_error(exc: Exception) -> str:
     """A single-line, length-capped error string for telemetry (avoids dumping huge tracebacks)."""
     return repr(exc).replace("\n", " ")[:500]
+
+
+def _sha1(text: str) -> str:
+    return hashlib.sha1(text.encode("utf-8")).hexdigest()[:12]
+
+
+def _git_commit() -> str | None:
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=Path(__file__).resolve().parents[3],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return out.stdout.strip()
+    except Exception:  # not a git checkout / git unavailable
+        return None
+
+
+def _run_metadata(scenario, model_config, attack_fixture, egress_allowlist) -> dict:
+    """Non-secret provenance for comparing runs across event iterations. Contains NO credentials
+    (the LLM key lives only in the environment and never enters model_config)."""
+    md = {
+        "git_commit": _git_commit(),
+        "python_version": platform.python_version(),
+        "scenario": scenario.name,
+        "scenario_hash": _sha1(scenario.task),
+        "model": _model_label(model_config),
+        "egress_allowlist_hash": _sha1("\n".join(sorted(egress_allowlist or []))),
+        "attack_name": None,
+        "attack_hash": None,
+    }
+    if attack_fixture:
+        md["attack_name"] = attack_fixture.get("name")
+        md["attack_hash"] = _sha1(json.dumps(attack_fixture, sort_keys=True, default=str))
+    return md
 
 
 def _apply_attack(attack: dict | None, ctx: ToolContext, store: ContextStore, log, tags) -> str | None:
@@ -177,10 +218,20 @@ def run(
         profile=profile,
     )
 
+    metadata = _run_metadata(scenario, model_config, attack_fixture, ctx.egress_allowlist)
+
     log = ObservationLog(log_path)
     tags = {"tenant": scenario.tenant_id, "scenario": scenario.name}
 
-    log.emit_event(**tags, phase="run", step_no=0, outcome="start", tool=None, model=_model_label(model_config))
+    log.emit_event(
+        **tags,
+        phase="run",
+        step_no=0,
+        outcome="start",
+        tool=None,
+        model=_model_label(model_config),
+        metadata=metadata,
+    )
 
     # The whole run body is wrapped so the run's "end" record — the only place the
     # completed/compromised verdict is persisted — is ALWAYS written, even if the adapter raises, a
@@ -265,6 +316,7 @@ def run(
         compromised=compromised,
         steps=len(result.steps),
         notes=["harm detection is a placeholder heuristic over mock-effect sinks."],
+        metadata=metadata,
     )
 
 
