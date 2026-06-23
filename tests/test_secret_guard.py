@@ -66,3 +66,35 @@ def test_repo_scan_is_clean():
     findings, scanned = secret_guard.scan_repo()
     assert findings == {}, f"repo is not clean: {findings}"
     assert scanned > 0
+
+
+# --- suppression marker is restricted to approved paths (P0.5) --------------------------------
+
+
+def test_marker_in_approved_path_suppresses_scan():
+    approved = next(iter(secret_guard.MARKER_ALLOWED_PATHS))
+    fake = "sk-" + "ant-api03-" + "A" * 40
+    text = f'{secret_guard.ALLOW_MARKER}\nANTHROPIC_API_KEY = "{fake}"\n'
+    assert secret_guard.evaluate_file(approved, text) == []
+
+
+def test_marker_in_unapproved_path_is_a_violation():
+    text = f"# {secret_guard.ALLOW_MARKER}\njust some notes\n"
+    labels = {label for _, label, _ in secret_guard.evaluate_file("docs/notes.md", text)}
+    assert "unauthorized-suppression-marker" in labels
+
+
+def test_marker_does_not_hide_secret_in_unapproved_path():
+    # The whole point of P0.5: adding the marker to a random file must NOT bypass the scan.
+    fake = "sk-" + "ant-api03-" + "A" * 40
+    text = f'{secret_guard.ALLOW_MARKER}\nANTHROPIC_API_KEY = "{fake}"\n'
+    labels = {label for _, label, _ in secret_guard.evaluate_file("evil/sneaky.py", text)}
+    assert "unauthorized-suppression-marker" in labels
+    assert "anthropic-key-literal" in labels  # secret still caught despite the marker
+
+
+def test_unapproved_marker_reports_its_line_number():
+    text = f"line one\nline two\n{secret_guard.ALLOW_MARKER}\n"
+    violations = secret_guard.evaluate_file("docs/x.md", text)
+    marker = next(v for v in violations if v[1] == "unauthorized-suppression-marker")
+    assert marker[0] == 3

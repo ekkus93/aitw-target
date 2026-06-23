@@ -2,9 +2,12 @@
 CI secret + leak guard. Fails the build if disallowed patterns appear in tracked files.
 
 secret-guard:allow-pattern-literals
-  ^ This marker tells the guard NOT to scan THIS file for pattern literals. Files that
-    legitimately contain the patterns themselves (this ruleset, its .example, the design
-    spec that documents it) carry this marker so the guard does not flag its own rules.
+  ^ This marker tells the guard NOT to scan a file for pattern literals. It is honored ONLY
+    in an exact allowlist of approved paths (MARKER_ALLOWED_PATHS below) — this ruleset, its
+    tests, and the local-pattern example file — which legitimately contain the patterns
+    themselves. The raw marker in ANY other tracked file is treated as an unauthorized scan
+    bypass and FAILS the guard. Design/planning docs must refer to the marker only in a
+    split/escaped form ("secret-guard:" + "allow-pattern-literals"), never as the raw literal.
 
 Two non-standard behaviours, both intentional:
   1. The LLM provider key is the ONE allowed real secret (loaded from env at runtime,
@@ -42,8 +45,20 @@ except Exception:  # pragma: no cover - exercised only without pyyaml installed
 REPO_ROOT = Path(__file__).resolve().parents[3]
 LOCAL_PATTERN_FILE = REPO_ROOT / "secret_guard_local.yaml"
 
-# Files containing this marker are skipped by the pattern scan (see module docstring).
+# This marker suppresses the pattern scan for a file — but ONLY in the exact approved paths
+# below. Anywhere else the raw marker is an unauthorized scan bypass and is itself a violation
+# (see module docstring). Built by concatenation here would be cleaner, but this module is an
+# approved path, so the literal is fine.
 ALLOW_MARKER = "secret-guard:allow-pattern-literals"
+
+# Exact repo-relative paths permitted to contain the raw ALLOW_MARKER.
+MARKER_ALLOWED_PATHS = frozenset(
+    {
+        "src/aitw/safety/secret_guard.py",
+        "tests/test_secret_guard.py",
+        "secret_guard_local.example.yaml",
+    }
+)
 
 # ── Conventional secret material (mock-service / third-party key shapes) ──
 # These match secret VALUES, never env-var names, so legitimate env references pass.
@@ -138,20 +153,50 @@ def _read(path):
         return None
 
 
+def evaluate_file(relpath, text, extra_compiled=()):
+    """Return violations for one file, encoding the suppression policy.
+
+    The ALLOW_MARKER is honored only for exact approved paths (MARKER_ALLOWED_PATHS), where it
+    suppresses the scan entirely. In any other file the marker is itself an unauthorized scan
+    bypass — a violation — and the file is STILL scanned for real secrets so nothing hides
+    behind the marker.
+    """
+    if ALLOW_MARKER in text:
+        if relpath in MARKER_ALLOWED_PATHS:
+            return []  # approved suppression
+        marker_line = next(
+            (i for i, line in enumerate(text.splitlines(), start=1) if ALLOW_MARKER in line), 1
+        )
+        violations = [
+            (
+                marker_line,
+                "unauthorized-suppression-marker",
+                "suppression marker is only permitted in approved paths",
+            )
+        ]
+        violations.extend(scan_text(text, extra_compiled))
+        return violations
+    return scan_text(text, extra_compiled)
+
+
 def scan_repo():
-    """Scan the repo. Returns {relpath: [violations]} (empty dict == clean)."""
+    """Scan the repo. Returns ({relpath: [violations]}, scanned_count) — empty dict == clean."""
     extra = load_local_patterns()
     extra_compiled = [(f"local-pattern[{i}]", re.compile(p)) for i, p in enumerate(extra)]
     findings = {}
     scanned = 0
     for path in _tracked_files():
         text = _read(path)
-        if text is None or ALLOW_MARKER in text:
+        if text is None:
+            continue
+        relpath = str(path.relative_to(REPO_ROOT))
+        # Approved-marker files are legitimately skipped and not counted as scanned.
+        if ALLOW_MARKER in text and relpath in MARKER_ALLOWED_PATHS:
             continue
         scanned += 1
-        violations = scan_text(text, extra_compiled)
+        violations = evaluate_file(relpath, text, extra_compiled)
         if violations:
-            findings[str(path.relative_to(REPO_ROOT))] = violations
+            findings[relpath] = violations
     return findings, scanned
 
 
@@ -159,14 +204,23 @@ def main(argv=None):
     findings, scanned = scan_repo()
     if findings:
         print("\n❌ secret guard FAILED — disallowed patterns in tracked files:\n", file=sys.stderr)
+        labels = set()
         for relpath, violations in sorted(findings.items()):
             for lineno, label, snippet in violations:
+                labels.add(label)
                 print(f"  {relpath}:{lineno}  [{label}]  {snippet}", file=sys.stderr)
         print(
             "\nRemove the offending content from the SOURCE file — do not delete the guard "
-            "pattern.\n",
+            "pattern.",
             file=sys.stderr,
         )
+        if "unauthorized-suppression-marker" in labels:
+            print(
+                "The suppression marker is restricted to approved paths. Do not add it to bypass "
+                "the scan; reference it in docs only in split form.",
+                file=sys.stderr,
+            )
+        print("", file=sys.stderr)
         return 1
     print(f"✅ secret guard: clean ({scanned} files scanned)")
     return 0
