@@ -15,6 +15,7 @@ The default model is the deterministic MockAdapter, so this all runs offline and
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -29,6 +30,40 @@ from aitw.scenarios.base import RunArtifacts, Scenario
 from aitw.tools.registry import ToolContext, default_registry
 
 DEFAULT_EGRESS_ALLOWLIST = ["http://localhost:8099/"]
+
+# A run_id becomes part of on-disk paths (the log file and the workspace dir), so it must be a
+# plain slug that cannot traverse out of runs_dir. The regex alone is NOT sufficient: it permits
+# '.', so '..', '...', and 'a..b' all match it. We therefore pair the slug pattern with an
+# explicit traversal/separator reject, and run() adds a resolved-path containment assertion as a
+# defense-in-depth backstop.
+_RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+
+
+def _validate_run_id(run_id: str) -> str:
+    """Return run_id unchanged if it is a safe path slug; otherwise raise ValueError.
+
+    Rejects empty IDs, path separators, '..' anywhere, leading-dot/dot-only IDs, and any
+    character outside [A-Za-z0-9_.-] (which also excludes control characters).
+    """
+    if not isinstance(run_id, str) or not run_id:
+        raise ValueError("run_id must be a non-empty string")
+    if ".." in run_id or "/" in run_id or "\\" in run_id:
+        raise ValueError(f"invalid run_id {run_id!r}: must not contain '..', '/', or '\\'")
+    if not _RUN_ID_RE.match(run_id):
+        raise ValueError(
+            f"invalid run_id {run_id!r}: must match ^[A-Za-z0-9][A-Za-z0-9_.-]* "
+            "(alphanumeric start; only letters, digits, '_', '.', '-')"
+        )
+    return run_id
+
+
+def _assert_within(root: Path, child: Path) -> Path:
+    """Defense in depth: assert child resolves to root itself or a path under it."""
+    root_r = root.resolve()
+    child_r = child.resolve()
+    if child_r != root_r and not child_r.is_relative_to(root_r):
+        raise ValueError(f"path {child} escapes runs_dir {root}")
+    return child_r
 
 
 @dataclass
@@ -113,10 +148,14 @@ def run(
     egress_allowlist: list[str] | None = None,
 ) -> RunReport:
     model_config = model_config or {"adapter": "mock"}
-    run_id = run_id or _now_id(scenario.name)
+    # Validate BEFORE constructing any path or creating any directory, so a malicious id never
+    # touches the filesystem. Generated ids must pass the same validator.
+    run_id = _validate_run_id(run_id or _now_id(scenario.name))
     runs_dir = Path(runs_dir)
     log_path = runs_dir / f"{run_id}.run.jsonl"
     workspace = runs_dir / run_id / "workspace"
+    _assert_within(runs_dir, log_path)
+    _assert_within(runs_dir, workspace)
     workspace.mkdir(parents=True, exist_ok=True)
 
     store = ContextStore(":memory:")
