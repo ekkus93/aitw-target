@@ -65,6 +65,40 @@ def _validate_run_id(run_id: str) -> str:
 # Path containment lives in aitw.safety.paths.resolve_under (shared chokepoint).
 
 
+def _prepare_run_artifacts(runs_dir: Path, run_id: str) -> tuple[Path, Path]:
+    """Resolve and create the per-run artifact set, refusing unsafe or reused paths.
+
+    Returns (log_path, workspace). Enforces (FIX2 P0.2/P0.3):
+      - resolved log/run-dir/workspace stay under resolved runs_dir (no traversal escape),
+      - none of those three paths is a preexisting symlink (no redirect outside containment,
+        even a symlink that happens to point back inside runs_dir),
+      - neither the log file nor the run directory already exists (run-id reuse fails loudly;
+        we never append to a prior log or reuse a prior workspace).
+    """
+    log_path = runs_dir / f"{run_id}.run.jsonl"
+    run_dir = runs_dir / run_id
+    workspace = run_dir / "workspace"
+
+    # Containment: resolved targets must not escape runs_dir. resolve() follows symlinks, so an
+    # outside-pointing symlink is caught here; the is_symlink checks below additionally reject
+    # inside-pointing symlinks (still an unexpected redirect we refuse to follow).
+    resolve_under(runs_dir, log_path)
+    resolve_under(runs_dir, workspace)
+
+    for p in (log_path, run_dir, workspace):
+        if p.is_symlink():
+            raise ValueError(f"refusing symlinked run artifact: {p}")
+
+    # No reuse: a fresh run must own fresh artifacts (no append, no stale workspace state).
+    if log_path.exists():
+        raise ValueError(f"run log already exists (run-id reuse not allowed): {log_path}")
+    if run_dir.exists():
+        raise ValueError(f"run directory already exists (run-id reuse not allowed): {run_dir}")
+
+    workspace.mkdir(parents=True, exist_ok=False)
+    return log_path, workspace
+
+
 @dataclass
 class RunReport:
     run_id: str
@@ -195,11 +229,7 @@ def run(
     # touches the filesystem. Generated ids must pass the same validator.
     run_id = _validate_run_id(run_id or _now_id(scenario.name))
     runs_dir = Path(runs_dir)
-    log_path = runs_dir / f"{run_id}.run.jsonl"
-    workspace = runs_dir / run_id / "workspace"
-    resolve_under(runs_dir, log_path)
-    resolve_under(runs_dir, workspace)
-    workspace.mkdir(parents=True, exist_ok=True)
+    log_path, workspace = _prepare_run_artifacts(runs_dir, run_id)
 
     store = ContextStore(":memory:")
     scenario.seed(store)
@@ -220,7 +250,8 @@ def run(
 
     metadata = _run_metadata(scenario, model_config, attack_fixture, ctx.egress_allowlist)
 
-    log = ObservationLog(log_path)
+    # Exclusive-create: defense in depth against ever appending to a prior run's log.
+    log = ObservationLog(log_path, create_new=True)
     tags = {"tenant": scenario.tenant_id, "scenario": scenario.name}
 
     log.emit_event(

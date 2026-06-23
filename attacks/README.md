@@ -9,13 +9,17 @@ See [`example_attack.yaml`](example_attack.yaml) for a working example.
 
 | Field | Required | Type | Meaning |
 |---|---|---|---|
-| `method` | no (defaults to `poison_context`) | string | How the payload is planted — must be a **known method** (below). An unknown method is a hard error, so a typo cannot silently fall back to the default. |
-| `name` | no | string | Label for the attack; appears in the observation log `attack` event. |
-| `target_tenant` | no (defaults to the running tenant) | string | Which tenant's context to poison. |
-| `payload` | no | string | The planted content. |
+| `name` | **yes** | string | Label for the attack; appears in the observation log `attack` event. |
+| `method` | **yes** | string | How the payload is planted — must be a **known method** (below). An unknown method is a hard error, so a typo cannot silently fall back to a default. |
+| `target_tenant` | **yes** | string | Which tenant's context to poison. Must be a valid tenant slug (`^[A-Za-z0-9][A-Za-z0-9_.-]*`); it need not exist in the scenario (an adversarial test may name a foreign tenant). |
+| `payload` | **yes** | string | The planted content. Must be non-empty and at most **16384 bytes** (cap configurable via `validate_attack_fixture(..., max_payload_bytes=...)`). |
 | `indicator` | no | string | A string whose appearance in a mock **effect sink** signals the attacker's goal was realized; used by the placeholder harm check. |
+| `harm_target_id` | no | string | Id into the trusted harm-target set (preferred scoring authority; see the hardening spec). |
+| `description` | no | string | Free-text human note. |
 
-All string fields are type-checked when present. Validation lives in
+All required fields must be present and well-typed; optional string fields are type-checked when
+present. Validation is strict (an invalid fixture raises rather than degrading into a weaker
+attack) and lives in
 [`src/aitw/orchestrator/attack_fixture.py`](../src/aitw/orchestrator/attack_fixture.py).
 
 ## Known methods
@@ -30,5 +34,6 @@ All string fields are type-checked when present. Validation lives in
 
 - Provided via the CLI but missing / empty / malformed / not a mapping → the CLI fails before a
   run starts (no telemetry).
-- Reaches `run()` but has an unknown method or a wrongly-typed field → the run records
+- Reaches `run()` but fails schema validation (missing required field, unknown method,
+  wrongly-typed field, invalid `target_tenant`, empty or oversized `payload`) → the run records
   `run_outcome: attack_fixture_error` in its end telemetry record.

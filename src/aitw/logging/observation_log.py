@@ -26,10 +26,16 @@ def _now() -> str:
 
 
 class ObservationLog:
-    def __init__(self, path: str | Path):
+    def __init__(self, path: str | Path, *, create_new: bool = False):
+        """Open a telemetry log.
+
+        create_new=True opens with exclusive-create ("x") semantics so a run log can never be
+        reopened in append mode over a prior run's records (run-id reuse must fail loudly — see
+        FIX2 P0.3). The default append mode is for re-reading an existing log via records().
+        """
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._fh = self.path.open("a", encoding="utf-8")
+        self._fh = self.path.open("x" if create_new else "a", encoding="utf-8")
 
     # --- emit helpers --------------------------------------------------------
 
