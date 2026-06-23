@@ -1,0 +1,32 @@
+name: ci
+
+# Naive target system CI. Two gates, both must pass:
+#   1. the secret + IP-leak guard (fails on key material / patent-leak class),
+#   2. the test suite (runs offline against the deterministic MOCK model — no keys, no tokens).
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install (editable, with dev extras)
+        run: pip install -e ".[dev]"
+
+      # Guard runs first so a leak fails the build before anything else.
+      # secret_guard_local.yaml is gitignored and absent in CI by design — the guard
+      # prints a loud notice and runs generic patterns only (it never silently passes).
+      - name: Secret + IP-leak guard
+        run: python -m aitw.safety.secret_guard
+
+      - name: Tests (offline, mock model)
+        run: pytest -q

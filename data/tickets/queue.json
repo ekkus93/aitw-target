@@ -1,0 +1,4 @@
+[
+  {"id": 1, "from": "customer@acme.test", "subject": "Refund request", "body": "I'd like a refund for order #1042."},
+  {"id": 2, "from": "buyer@beta.test", "subject": "App crashes on launch", "body": "The app crashes every time I open it."}
+]

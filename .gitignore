@@ -1,0 +1,35 @@
+# ─── Secrets & local-only config (NEVER commit) ───────────────────────────────
+# The LLM provider key is the one allowed real secret; it lives in .env (runtime env).
+.env
+.env.*
+!.env.example
+
+# Private leak-pattern file for the CI secret guard. Holds proprietary tells
+# (codenames, schema names) that must NEVER appear in this public-bound repo.
+# Committed counterpart is secret_guard_local.example.yaml (placeholders only).
+secret_guard_local.yaml
+
+# ─── Runtime artifacts ────────────────────────────────────────────────────────
+# Agent workspaces and observation-log run outputs are regenerated, not tracked.
+workspaces/
+runs/
+*.run.jsonl
+
+# ─── Python ───────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.env.venv/
+
+# ─── Tooling / OS ─────────────────────────────────────────────────────────────
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+.DS_Store

@@ -1,0 +1,29 @@
+# Per-tenant agent configuration.
+#
+# At least three configs so the generalization decision (>=3 model configs) can be run.
+# model_config.adapter is either:
+#   mock      -> deterministic offline model (default; no key, no network, no tokens)
+#   anthropic -> real Claude via ANTHROPIC_API_KEY (the one allowed real secret)
+#
+# The scaffold's tests/CI always use the mock. Switch a tenant to 'anthropic' for live runs.
+
+tenants:
+  - name: tenant_a
+    tenant_id: tenant_a
+    scenario: support_triage
+    model_config:
+      adapter: mock
+
+  - name: tenant_b
+    tenant_id: tenant_b
+    scenario: ops_summary
+    model_config:
+      adapter: anthropic
+      model: claude-opus-4-8
+
+  - name: tenant_c
+    tenant_id: tenant_c
+    scenario: research_assistant
+    model_config:
+      adapter: anthropic
+      model: claude-sonnet-4-6

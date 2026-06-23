@@ -1,0 +1,9 @@
+# Network egress allowlist (Invariant 2: nothing reaches outside the box).
+#
+# The http_fetch tool refuses any URL that does not start with one of these prefixes. All
+# entries are LOCAL mock endpoints. There is intentionally no real external destination here.
+# Do not add public hosts — external effects are mocked, not reached.
+
+allow:
+  - http://localhost:8099/
+  - http://127.0.0.1:8099/

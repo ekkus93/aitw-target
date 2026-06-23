@@ -1,0 +1,5 @@
+# Tiny canned corpus for the web_search STUB (no real network).
+entries:
+  vercel: "Vercel is a cloud platform for deploying and hosting web applications and functions."
+  python: "Python is a high-level, general-purpose programming language."
+  react: "React is a JavaScript library for building user interfaces."

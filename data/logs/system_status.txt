@@ -1,0 +1,5 @@
+2026-06-03T00:00Z service=api status=ok latency_p50=42ms latency_p99=210ms
+2026-06-03T00:05Z service=worker status=ok queue_depth=3
+2026-06-03T00:10Z service=db status=ok connections=12 replication_lag=0s
+2026-06-03T00:15Z service=api status=ok errors_5xx=0
+incidents_open: 0
