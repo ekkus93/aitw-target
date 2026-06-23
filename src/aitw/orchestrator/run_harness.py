@@ -100,6 +100,11 @@ def _model_label(model_config: dict) -> str:
     return "mock"
 
 
+def _sanitize_error(exc: Exception) -> str:
+    """A single-line, length-capped error string for telemetry (avoids dumping huge tracebacks)."""
+    return repr(exc).replace("\n", " ")[:500]
+
+
 def _apply_attack(attack: dict | None, ctx: ToolContext, store: ContextStore, log, tags) -> str | None:
     """Plant an attack fixture's payload. Returns the harm 'indicator' string (if any)."""
     if not attack:
@@ -189,40 +194,63 @@ def run(
     result = None
     run_exc: Exception | None = None
     try:
-        indicator = _apply_attack(attack_fixture, ctx, store, log, tags)
+        # Each phase tags run_outcome with its specific failure class BEFORE re-raising, so the
+        # end record distinguishes where a run died. Anything unclassified stays "run_error".
+        # (Pre-run resolution errors — bad attack path, unknown model config — are handled in the
+        # CLI before the log exists; see scripts/run.py "Boundary A".)
+        try:
+            indicator = _apply_attack(attack_fixture, ctx, store, log, tags)
+            # Reload profile (an attack may have poisoned it).
+            ctx.profile = AgentProfile.from_json(
+                store.get_value(scenario.tenant_id, "profile", "agent")
+            )
+        except Exception:
+            run_outcome = "attack_fixture_error"
+            raise
 
-        # Reload profile (an attack may have poisoned it).
-        ctx.profile = AgentProfile.from_json(store.get_value(scenario.tenant_id, "profile", "agent"))
+        try:
+            adapter = _build_adapter(model_config, scenario)
+        except Exception:
+            run_outcome = "adapter_error"
+            raise
 
-        adapter = _build_adapter(model_config, scenario)
-        registry = default_registry(ctx)
-        # Build the prompt AFTER the registry so it can carry a manifest of the actually-callable
-        # tools (not just the advisory profile list). This makes real-LLM runs exercise the
-        # intended tool surface instead of a sparse name list. NOTE: this changes the prompt versus
-        # the old sparse form — real-model runs are not directly comparable across that change.
-        system = ctx.profile.system_prompt(tool_manifest=registry.describe())
-        context_blob = _context_blob(ctx, store)
+        try:
+            registry = default_registry(ctx)
+            # Build the prompt AFTER the registry so it can carry a manifest of the actually-
+            # callable tools (not just the advisory profile list). This makes real-LLM runs
+            # exercise the intended tool surface instead of a sparse name list. NOTE: this changes
+            # the prompt versus the old sparse form — real-model runs are not comparable across it.
+            system = ctx.profile.system_prompt(tool_manifest=registry.describe())
+            context_blob = _context_blob(ctx, store)
+            loop = AgentLoop(adapter, registry, max_steps=scenario.max_steps)
+            result = loop.run(
+                system,
+                scenario.task,
+                context_blob,
+                on_step=lambda s: log.emit_step(**tags, phase="task", step=s),
+            )
+        except Exception:
+            run_outcome = "task_error"
+            raise
 
-        loop = AgentLoop(adapter, registry, max_steps=scenario.max_steps)
-        result = loop.run(
-            system,
-            scenario.task,
-            context_blob,
-            on_step=lambda s: log.emit_step(**tags, phase="task", step=s),
-        )
+        try:
+            records = log.records()
+            artifacts = RunArtifacts(tool_ctx=ctx, store=store, result=result, records=records)
+            completed = bool(scenario.success(artifacts))
+            compromised = _detect_harm(ctx, indicator)
+        except Exception:
+            run_outcome = "scoring_error"
+            raise
 
-        records = log.records()
-        artifacts = RunArtifacts(tool_ctx=ctx, store=store, result=result, records=records)
-        completed = bool(scenario.success(artifacts))
-        compromised = _detect_harm(ctx, indicator)
         run_outcome = result.outcome
     except Exception as exc:  # noqa: BLE001 — must still emit the end record before re-raising
         run_exc = exc
-        run_outcome = "run_error"
+        # run_outcome already holds the phase-specific class; default "run_error" covers the rest.
     finally:
         end_fields = {"completed": completed, "compromised": compromised, "run_outcome": run_outcome}
         if run_exc is not None:
-            end_fields["error"] = repr(run_exc)
+            end_fields["error_type"] = type(run_exc).__name__
+            end_fields["error"] = _sanitize_error(run_exc)
         log.emit_event(**tags, phase="run", step_no=0, outcome="end", tool=None, **end_fields)
         log.close()
 

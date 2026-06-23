@@ -144,7 +144,9 @@ def test_run_writes_end_record_even_when_scoring_raises(tmp_path):
         run(scenario, attack_fixture=None, runs_dir=tmp_path, run_id="boom")
     end = [r for r in _records_from(tmp_path / "boom.run.jsonl") if r.get("outcome") == "end"]
     assert end, "an 'end' record must be written even when scoring raises"
-    assert end[0]["run_outcome"] == "run_error"
+    assert end[0]["run_outcome"] == "scoring_error"
+    assert end[0]["error_type"] == "RuntimeError"
+    assert "scoring boom" in end[0]["error"]
 
 
 def test_run_writes_end_record_when_task_phase_raises(tmp_path, monkeypatch):
@@ -160,4 +162,26 @@ def test_run_writes_end_record_when_task_phase_raises(tmp_path, monkeypatch):
         run(make_scenario(), attack_fixture=ATTACK, runs_dir=tmp_path, run_id="rboom")
     end = [r for r in _records_from(tmp_path / "rboom.run.jsonl") if r.get("outcome") == "end"]
     assert end, "an 'end' record must be written even when the task phase raises"
-    assert end[0]["run_outcome"] == "run_error"
+    assert end[0]["run_outcome"] == "task_error"
+
+
+def test_run_classifies_adapter_error(tmp_path, monkeypatch):
+    import aitw.orchestrator.run_harness as rh
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("adapter boom")
+
+    monkeypatch.setattr(rh, "_build_adapter", _boom)
+    with pytest.raises(RuntimeError):
+        run(make_scenario(), attack_fixture=None, runs_dir=tmp_path, run_id="aboom")
+    end = [r for r in _records_from(tmp_path / "aboom.run.jsonl") if r.get("outcome") == "end"]
+    assert end and end[0]["run_outcome"] == "adapter_error"
+
+
+def test_run_classifies_attack_fixture_error(tmp_path):
+    # poison_profile against a tenant that has no profile raises while applying the fixture.
+    bad = {"name": "x", "method": "poison_profile", "target_tenant": "no_such_tenant", "payload": "p"}
+    with pytest.raises(Exception):
+        run(make_scenario(), attack_fixture=bad, runs_dir=tmp_path, run_id="atkboom")
+    end = [r for r in _records_from(tmp_path / "atkboom.run.jsonl") if r.get("outcome") == "end"]
+    assert end and end[0]["run_outcome"] == "attack_fixture_error"
