@@ -74,17 +74,27 @@ class ObservationLog:
         self._fh.flush()
 
     def records(self) -> list[dict]:
-        # Tolerate a torn/partial final line (e.g. a crash mid-write): skip it rather than let one
-        # malformed line raise and abort the whole read — which would drop every prior record.
-        out: list[dict] = []
+        """Parse the JSONL log into records — strict, with ONE tolerance.
+
+        A torn/partial FINAL line (e.g. a crash mid-write) is skipped, so the complete records
+        before it survive. Any malformed NON-final line is corruption that must NOT be silently
+        dropped — it raises, identifying the physical file line and path. Blank lines (including
+        trailing ones) are ignored and do not count when deciding which line is "final".
+        """
         with self.path.open("r", encoding="utf-8") as fh:
-            for line in fh:
-                if not line.strip():
-                    continue
-                try:
-                    out.append(json.loads(line))
-                except json.JSONDecodeError:
-                    continue
+            raw = fh.readlines()
+        # (physical 1-based line number, text) for non-blank lines only.
+        nonblank = [(i, line) for i, line in enumerate(raw, start=1) if line.strip()]
+        out: list[dict] = []
+        for pos, (lineno, line) in enumerate(nonblank):
+            try:
+                out.append(json.loads(line))
+            except json.JSONDecodeError as exc:
+                if pos == len(nonblank) - 1:
+                    continue  # tolerate a torn trailing line
+                raise ValueError(
+                    f"malformed telemetry record at {self.path}:{lineno} (not valid JSON)"
+                ) from exc
         return out
 
     def close(self) -> None:
