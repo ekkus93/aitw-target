@@ -194,11 +194,15 @@ def run(
         # Reload profile (an attack may have poisoned it).
         ctx.profile = AgentProfile.from_json(store.get_value(scenario.tenant_id, "profile", "agent"))
 
-        system = ctx.profile.system_prompt()
-        context_blob = _context_blob(ctx, store)
-
         adapter = _build_adapter(model_config, scenario)
         registry = default_registry(ctx)
+        # Build the prompt AFTER the registry so it can carry a manifest of the actually-callable
+        # tools (not just the advisory profile list). This makes real-LLM runs exercise the
+        # intended tool surface instead of a sparse name list. NOTE: this changes the prompt versus
+        # the old sparse form — real-model runs are not directly comparable across that change.
+        system = ctx.profile.system_prompt(tool_manifest=registry.describe())
+        context_blob = _context_blob(ctx, store)
+
         loop = AgentLoop(adapter, registry, max_steps=scenario.max_steps)
         result = loop.run(
             system,

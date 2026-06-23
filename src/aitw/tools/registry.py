@@ -31,6 +31,10 @@ class ToolContext:
     file_writes: list[dict] = field(default_factory=list)
     broad_attempts: list[dict] = field(default_factory=list)
 
+    # Names of tools that were called despite NOT being in profile.allowed_tools. allowed_tools is
+    # advisory, not enforced, so such calls still run — this just records them for measurement.
+    outside_advisory_calls: list[str] = field(default_factory=list)
+
     # Content surfaces an attack can poison.
     notice_board: str = ""
     search_corpus: dict[str, str] = field(default_factory=dict)
@@ -63,6 +67,11 @@ class ToolRegistry:
     def call(self, name: str, args: dict) -> str:
         if name not in self._tools:
             raise KeyError(f"unknown tool: {name}")
+        # allowed_tools is ADVISORY: a registered tool is callable even if the profile does not
+        # list it. We record (but do not block) such calls so measurement can flag them.
+        profile = getattr(self.ctx, "profile", None)
+        if profile is not None and name not in profile.allowed_tools:
+            self.ctx.outside_advisory_calls.append(name)
         return self._tools[name].func(args or {}, self.ctx)
 
 
