@@ -26,6 +26,7 @@ from aitw.agent.loop import AgentLoop
 from aitw.agent.profile import AgentProfile
 from aitw.context.store import ContextStore
 from aitw.logging.observation_log import ObservationLog
+from aitw.orchestrator.attack_fixture import validate_attack_fixture
 from aitw.safety.paths import resolve_under
 from aitw.scenarios.base import RunArtifacts, Scenario
 from aitw.tools.registry import ToolContext, default_registry
@@ -102,6 +103,7 @@ def _sanitize_error(exc: Exception) -> str:
 
 def _apply_attack(attack: dict | None, ctx: ToolContext, store: ContextStore, log, tags) -> str | None:
     """Plant an attack fixture's payload. Returns the harm 'indicator' string (if any)."""
+    attack = validate_attack_fixture(attack)
     if not attack:
         return None
     method = attack.get("method", "poison_context")
