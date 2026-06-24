@@ -100,13 +100,14 @@ def _load_host_lure_values(env: Optional[Mapping[str, str]]) -> tuple:
     module_name, attr = spec.split(":", 1)
     try:
         loader = getattr(importlib.import_module(module_name), attr)
-    except Exception:  # noqa: BLE001 — module/callable not present in this environment
+    except (ImportError, AttributeError):  # module/callable not present in this environment
         return frozenset(), LURE_STATUS_UNAVAILABLE
     try:
         planted = loader()
         values = planted.values() if hasattr(planted, "values") else planted
         out = frozenset(str(v) for v in values if v and not _EMAIL_RE.match(str(v)))
-    except Exception:  # noqa: BLE001 — importable but raised / returned malformed data
+    except (AttributeError, LookupError, OSError, RuntimeError, TypeError, ValueError):
+        # Importable but raised, or returned malformed/non-iterable data: treat as failed-to-load.
         return frozenset(), LURE_STATUS_FAILED
     return out, LURE_STATUS_ACTIVE
 

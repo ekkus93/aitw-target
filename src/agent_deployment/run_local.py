@@ -69,7 +69,8 @@ def main(argv=None) -> int:
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
-    except Exception as exc:  # noqa: BLE001 — in-run failure; harness already wrote end telemetry
+    except (OSError, ImportError, LookupError, RuntimeError, TypeError) as exc:
+        # In-run failure; the harness already wrote end telemetry. (CliError/ValueError handled above.)
         print(f"run failed: {exc!r}", file=sys.stderr)
         return 1
 

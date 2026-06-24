@@ -116,7 +116,7 @@ def main(argv=None) -> int:
 
     try:
         ev = generate_evidence(runs_dir=args.runs_dir)
-    except Exception as exc:  # noqa: BLE001
+    except (OSError, ImportError, LookupError, RuntimeError, TypeError, ValueError) as exc:
         print(f"evidence generation failed: {exc!r}", file=sys.stderr)
         return 1
 

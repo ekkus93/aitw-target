@@ -19,11 +19,12 @@ submitted artifact does not bundle a runtime.
 
 from __future__ import annotations
 
+import re
 from typing import Optional
 
 try:  # provided by the host runtime; absent in this development fork.
     from aitw.orchestrator.deployments import V2Deployment
-except Exception:  # noqa: BLE001 — any import failure falls back to a plain base for local tests
+except ImportError:  # only a genuinely-absent module falls back; a broken host module fails loud.
     V2Deployment = object
 
 from agent_deployment.external_effects import EffectPolicy
@@ -38,6 +39,20 @@ _HOST_REDACT_METHODS = ("redact_text", "redact", "guard")
 # Fail-closed sentinel returned when a scan/redaction path raises: degraded content, never a raw
 # value. Surfaced alongside a synthetic ``scanner_error`` finding so the failure stays visible.
 _SCANNER_ERROR_MARKER = "[redacted:scanner_error]"
+
+# Faults a scanner/redactor (ours or a host-provided one) can plausibly raise. We catch this
+# explicit set — not a blind ``except Exception`` — so a scan/redact failure FAILS CLOSED (safe
+# marker / ``scanner_error`` finding) while a genuinely unexpected error type still propagates (fail
+# loud) instead of being silently swallowed.
+_SCANNER_FAULTS = (
+    ArithmeticError,
+    AttributeError,
+    LookupError,
+    TypeError,
+    ValueError,
+    RuntimeError,
+    re.error,
+)
 
 
 # --------------------------------------------------------------------------------------------------
@@ -139,13 +154,13 @@ class ScannerAdapter:
     def scan_text(self, text, *, surface: str = "unknown") -> list:
         try:
             return self._scanner.scan_text(text, surface=surface)
-        except Exception:  # noqa: BLE001 — fail closed: a scan failure is not an all-clear
+        except _SCANNER_FAULTS:  # fail closed: a scan failure is not an all-clear
             return [Finding("scanner_error", surface, 1)]
 
     def redact_text(self, text, *, surface: str = "unknown") -> str:
         try:
             return self._scanner.redact_text(text, surface=surface).text
-        except Exception:  # noqa: BLE001 — fail closed: never echo the raw input on failure
+        except _SCANNER_FAULTS:  # fail closed: never echo the raw input on failure
             return _SCANNER_ERROR_MARKER
 
     # Generic positional-surface aliases the host might use instead.
@@ -224,11 +239,11 @@ class _CompositeScanner(Scanner):
             for fn in self._host:
                 try:
                     text = fn(text, surface)
-                except Exception:  # noqa: BLE001 — optional host pre-pass failed; rely on our net
+                except _SCANNER_FAULTS:  # optional host pre-pass failed; rely on our net
                     host_errors += 1
         try:
             result = super().redact_text(text, surface=surface)
-        except Exception:  # noqa: BLE001 — our net failed too: fail closed, never echo raw text
+        except _SCANNER_FAULTS:  # our net failed too: fail closed, never echo raw text
             return RedactionResult(_SCANNER_ERROR_MARKER, [Finding("scanner_error", surface, 1)])
         if host_errors:
             result.findings = list(result.findings) + [Finding("scanner_error", surface, host_errors)]
@@ -305,7 +320,8 @@ def _allowed_recipients_for_ctx(ctx) -> frozenset:
             from aitw.scenarios.fixtures import load_tickets
 
             return frozenset(t["from"] for t in load_tickets() if t.get("from"))
-        except Exception:  # noqa: BLE001 — no fixture access: fail closed to empty
+        except (ImportError, OSError, ValueError, KeyError, TypeError):
+            # No fixture module/file, malformed fixture JSON, or unexpected shape: fail closed.
             return frozenset()
     return frozenset()
 

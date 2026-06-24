@@ -24,9 +24,30 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+import yaml
+from aitw.cli import CliError
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 ATTACK_PATH = str(REPO_ROOT / "attacks" / "example_attack.yaml")
 SCHEMA_PATH = REPO_ROOT / "schemas" / "operational_bulletin.schema.json"
+
+# Failure modes an individual preflight check may surface. Caught (per check) so one check's failure
+# is recorded as a FAIL — this is a report-and-continue harness — instead of aborting the whole run.
+# This is an explicit set rather than a blind ``except Exception``: a genuinely unexpected error type
+# still propagates (fail loud) rather than being silently swallowed.
+_CHECK_FAULTS = (
+    AssertionError,
+    AttributeError,
+    CliError,
+    ImportError,
+    LookupError,
+    OSError,
+    RuntimeError,
+    TypeError,
+    ValueError,
+    subprocess.SubprocessError,
+    yaml.YAMLError,
+)
 
 
 @dataclass
@@ -70,7 +91,7 @@ def check_install() -> CheckResult:
             f"imported; python {ver}",
             ok,
         )
-    except Exception as exc:  # noqa: BLE001
+    except _CHECK_FAULTS as exc:
         return _ok("install works", "pip install -e .", "package imports", repr(exc), False)
 
 
@@ -87,13 +108,11 @@ def check_provider_imports() -> CheckResult:
             f"hooks wired={ok}",
             ok,
         )
-    except Exception as exc:  # noqa: BLE001
+    except _CHECK_FAULTS as exc:
         return _ok("provider imports", "import provider", "imports + hooks", repr(exc), False)
 
 
 def check_manifest_accepted() -> CheckResult:
-    import yaml
-
     try:
         manifest = yaml.safe_load((REPO_ROOT / "deployment.yaml").read_text())
         required = {"name", "version", "provider", "runtime", "capabilities"}
@@ -108,7 +127,7 @@ def check_manifest_accepted() -> CheckResult:
             f"missing={sorted(missing)}; provider_ok={prov_ok}",
             ok,
         )
-    except Exception as exc:  # noqa: BLE001
+    except _CHECK_FAULTS as exc:
         return _ok("deployment manifest accepted", "parse deployment.yaml", "valid", repr(exc), False)
 
 
@@ -123,7 +142,7 @@ def check_no_attack_scenarios(runs_dir: Path) -> CheckResult:
             r = run_with_deployment(sc, runs_dir=runs_dir, run_id=f"pf-clean-{sc}")
             results[sc] = (r.completed, r.compromised)
             ok = ok and r.completed and not r.compromised
-        except Exception as exc:  # noqa: BLE001
+        except _CHECK_FAULTS as exc:
             results[sc] = ("error", repr(exc))
             ok = False
     return _ok(
@@ -161,7 +180,7 @@ def check_poisoned_context_blocked(runs_dir: Path) -> CheckResult:
             f"completed={r.completed} compromised={r.compromised} sanitized={sanitized} no_exfil={no_exfil}",
             ok,
         )
-    except Exception as exc:  # noqa: BLE001
+    except _CHECK_FAULTS as exc:
         return _ok("poisoned-context attack blocked", "run with --fixture", "blocked", repr(exc), False)
 
 
@@ -205,7 +224,7 @@ def check_off_list_scheduler_denied(tmp_path) -> CheckResult:
             f"result={out!r} scheduled={ctx.scheduled}",
             ok,
         )
-    except Exception as exc:  # noqa: BLE001
+    except _CHECK_FAULTS as exc:
         return _ok("off-list scheduler denied", "registry.call scheduler", "DENIED", repr(exc), False)
 
 
@@ -226,7 +245,7 @@ def check_cross_tenant_memory_denied(tmp_path) -> CheckResult:
             f"result={read!r}",
             ok,
         )
-    except Exception as exc:  # noqa: BLE001
+    except _CHECK_FAULTS as exc:
         return _ok("cross-tenant memory denied", "scoped memory read", "DENIED", repr(exc), False)
 
 
@@ -255,7 +274,7 @@ def check_bulletin_schema_valid() -> CheckResult:
             "valid",
             True,
         )
-    except Exception as exc:  # noqa: BLE001
+    except _CHECK_FAULTS as exc:
         return _ok("bulletin schema valid", "validate_bulletin(default_bulletin())", "valid", repr(exc), False)
 
 
@@ -280,7 +299,7 @@ def check_secret_guard_clean() -> CheckResult:
             f"exit={proc.returncode}; {tail}",
             ok,
         )
-    except Exception as exc:  # noqa: BLE001
+    except _CHECK_FAULTS as exc:
         return _ok("secret guard clean", "python -m aitw.safety.secret_guard", "exit 0", repr(exc), False)
 
 
@@ -309,7 +328,7 @@ def check_artifact_import_host_layout(tmp_path) -> CheckResult:
         from agent_deployment import packaging
 
         out = packaging.build_artifact(tmp_path / "artifact")
-    except Exception as exc:  # noqa: BLE001
+    except _CHECK_FAULTS as exc:
         return _ok("clean artifact import (host layout)", command, "provider imports + constructs", f"build failed: {exc!r}", False)
 
     host_src = _host_runtime_src()
@@ -355,7 +374,7 @@ def check_artifact_scan_clean(tmp_path) -> CheckResult:
             detail,
             ok,
         )
-    except Exception as exc:  # noqa: BLE001
+    except _CHECK_FAULTS as exc:
         return _ok("artifact scan clean", "scan_artifact(build)", "no findings", repr(exc), False)
 
 

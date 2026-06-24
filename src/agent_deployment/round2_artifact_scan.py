@@ -109,7 +109,7 @@ def _check_manifest(root: Path) -> list[ScanFinding]:
         return [ScanFinding("deployment.yaml", "manifest", "missing manifest")]
     try:
         data = yaml.safe_load(mf.read_text(encoding="utf-8"))
-    except Exception as exc:  # noqa: BLE001
+    except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
         return [ScanFinding("deployment.yaml", "manifest", f"unparseable: {type(exc).__name__}")]
     if data != EXPECTED_MANIFEST:
         if isinstance(data, dict):
