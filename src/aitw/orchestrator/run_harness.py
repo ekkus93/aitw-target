@@ -122,11 +122,19 @@ class RunHooks:
       * ``sanitize_context(blob, ctx) -> str`` — applied to the raw ``_context_blob`` output
         BEFORE the model sees it (untrusted shared context reaches the model here, not via a tool
         call), so it can be marked as data and any control tokens it carries neutralized.
+      * ``sanitize_final_output(text, ctx) -> str`` — applied to the model's final answer AFTER
+        scoring and before the answer is returned/exposed, so a policy layer can redact sensitive
+        content from the final output without affecting the (unchanged) completion/harm scoring.
+      * ``build_log(log_path) -> ObservationLog`` — replaces ``ObservationLog(log_path,
+        create_new=True)``; a policy layer can supply a log that additionally redacts sensitive
+        values from every telemetry record before it is written.
     """
 
     build_registry: Callable[..., object] | None = None
     pre_task: Callable[..., None] | None = None
     sanitize_context: Callable[[str, ToolContext], str] | None = None
+    sanitize_final_output: Callable[[str, ToolContext], str] | None = None
+    build_log: Callable[..., object] | None = None
 
 
 @dataclass
@@ -290,8 +298,12 @@ def run(
 
     metadata = _run_metadata(scenario, model_config, attack_fixture, ctx.egress_allowlist)
 
-    # Exclusive-create: defense in depth against ever appending to a prior run's log.
-    log = ObservationLog(log_path, create_new=True)
+    # Exclusive-create: defense in depth against ever appending to a prior run's log. A policy
+    # layer may supply a redacting log via the build_log hook; default None keeps the base log.
+    if hooks.build_log is not None:
+        log = hooks.build_log(log_path)
+    else:
+        log = ObservationLog(log_path, create_new=True)
     tags = {"tenant": scenario.tenant_id, "scenario": scenario.name}
 
     log.emit_event(
@@ -388,6 +400,11 @@ def run(
         except Exception:
             run_outcome = "scoring_error"
             raise
+
+        # Redact the final answer AFTER scoring (completion/harm computed on the raw result), before
+        # it is returned/exposed. Default None leaves the final answer untouched.
+        if hooks.sanitize_final_output is not None and result is not None and result.final is not None:
+            result.final = hooks.sanitize_final_output(result.final, ctx)
 
         run_outcome = result.outcome
     except Exception as exc:  # noqa: BLE001 — must still emit the end record before re-raising

@@ -14,27 +14,38 @@ A defended deployment layer for a multi-tenant agent runtime. It enforces ordina
 safeguards while preserving the agent's ability to complete its assigned task. All external effects
 are mocked or sandboxed.
 
+## Contract: host-runtime plugin
+
+This package is **not** a standalone agent system. It is a defense layer loaded on top of a
+host-provided agent runtime. The host environment must make that runtime importable as the Python
+package `aitw`. The deployment integrates only through the runtime's documented extension points
+(it supplies hook callables to the runtime's `run()` entrypoint); it does not fork the run loop.
+
 ## Setup
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
-pip install -e .
+pip install -e ".[dev]"
 ```
 
-The deployment layer integrates with the agent runtime through its documented extension points; the
-runtime is provided by the host environment.
+`aitw` (the host runtime) is provided by the host environment and is intentionally not declared as
+a package dependency here.
 
 ## Run
 
-The deployment entrypoint is importable:
+The deployment entrypoint is importable and can be constructed unbound, then bound to a scenario:
 
 ```python
 from agent_deployment.provider import AgentDeployment
+
+AgentDeployment()                                   # unbound (import/health check)
 deployment = AgentDeployment.for_scenario("support_triage")
-hooks = deployment.hooks()   # passed to the runtime's run() entrypoint
+# or: deployment = AgentDeployment().configure_scenario("support_triage")
+hooks = deployment.hooks()                          # passed to the runtime's run() entrypoint
 ```
 
-A convenience local runner is also provided:
+Calling `hooks()` or `run()` before a scenario is configured raises a clear error (no silent
+default). A convenience local runner is also provided:
 
 ```bash
 python -m agent_deployment.run_local --scenario support_triage
@@ -90,8 +101,9 @@ run workspace and size-bounded. No production credentials or real customer data 
 
 ## Known limitations
 
-- The deployment layer depends on the host agent runtime being present; it is not a standalone
-  agent system.
+- The deployment layer depends on the host agent runtime (importable as `aitw`) being present; it
+  is not a standalone agent system. Importing the provider in an environment without that runtime
+  will fail — this is expected for a host-plugin package.
 - The bundled scenarios use a deterministic offline mock model for reproducible local runs; they
   exercise the policy wiring rather than measuring a live model.
 """

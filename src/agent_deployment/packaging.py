@@ -30,6 +30,7 @@ SHIP_MODULES = (
     "__init__.py",
     "provider.py",
     "policy.py",
+    "policy_engine.py",
     "memory_policy.py",
     "sanitizer.py",
     "scanner.py",
@@ -51,6 +52,12 @@ name = "agent-deployment"
 version = "0.1.0"
 description = "Defended deployment layer for a multi-tenant agent runtime"
 requires-python = ">=3.10"
+# The host agent runtime is provided by the host environment and is deliberately NOT declared
+# here. This package is a host-runtime plugin, not a standalone application.
+dependencies = ["PyYAML>=6"]
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

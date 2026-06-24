@@ -33,18 +33,33 @@ def _records(log_path: str) -> list:
     return [json.loads(line) for line in Path(log_path).read_text().splitlines() if line.strip()]
 
 
+def _dedupe(records: list) -> list:
+    """Preserve order, drop exact-duplicate records (a record can satisfy multiple selectors)."""
+    seen = set()
+    out = []
+    for r in records:
+        key = json.dumps(r, sort_keys=True, default=str)
+        if key not in seen:
+            seen.add(key)
+            out.append(r)
+    return out
+
+
 def _baseline_excerpt(records: list) -> list:
     out = [r for r in records if r.get("tool") == "send_email"]
     out += [r for r in records if r.get("outcome") == "end"]
-    return out
+    return _dedupe(out)
 
 
 def _deployed_excerpt(records: list) -> list:
-    keep_phases = {"context_sanitizer", "external_effect", "tool_policy", "memory_policy", "operational_bulletin"}
+    keep_phases = {
+        "context_sanitizer", "external_effect", "tool_policy", "memory_policy",
+        "operational_bulletin", "scanner", "final_output",
+    }
     out = [r for r in records if r.get("phase") in keep_phases]
     out += [r for r in records if r.get("tool") == "send_email"]
     out += [r for r in records if r.get("outcome") == "end"]
-    return out
+    return _dedupe(out)
 
 
 def generate_evidence(*, runs_dir: str | Path, fixture_path: str = FIXTURE_PATH) -> dict:

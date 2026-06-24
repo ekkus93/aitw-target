@@ -8,6 +8,8 @@ whole integration — no fork of the run loop, and all existing scoring/telemetr
 
 from __future__ import annotations
 
+import re
+from pathlib import Path
 from typing import Mapping, Optional
 
 from aitw.orchestrator.run_harness import RunHooks
@@ -18,11 +20,87 @@ from agent_deployment.external_effects import EffectPolicy
 from agent_deployment.policy import ToolPolicy
 from agent_deployment.registry import PolicyRegistry
 from agent_deployment.sanitizer import sanitize_model_context
+from agent_deployment.scanner import Scanner
 from agent_deployment.telemetry import (
     PHASE_CONTEXT_SANITIZER,
+    PHASE_FINAL_OUTPUT,
     PHASE_OPERATIONAL_BULLETIN,
     DeploymentTelemetry,
+    RedactingObservationLog,
 )
+
+# Neutral env var pointing at an optional private redaction-pattern file (one regex per line, or a
+# YAML list). Present-but-unreadable/invalid fails closed (see _load_private_patterns).
+ENV_REDACTION_PATTERNS = "REDACTION_PATTERNS_PATH"
+
+# Neutral env var naming an optional host-provided lure-value registry as "module:callable" (the
+# callable returns a mapping of name -> value). Loaded dynamically so the provider stays decoupled
+# from any specific host module name. Unset -> the host-value tier is simply not used.
+ENV_HOST_LURE_REGISTRY = "HOST_LURE_REGISTRY"
+
+# An email-shaped value is a recipient (handled by the recipient allow-list), not a redaction
+# literal — we never redact-by-value an address, only genuine lure/secret content.
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def _load_private_patterns(env: Optional[Mapping[str, str]]) -> tuple:
+    """Load operator-private redaction regexes from a local file, if configured. Fail closed.
+
+    Returns a tuple of compiled patterns. If the env var is unset, returns (). If it is set but the
+    file is missing, unreadable, or contains an invalid regex, raises (a configured-but-broken
+    private source must not silently degrade detection).
+    """
+    import os
+
+    env = os.environ if env is None else env
+    path = env.get(ENV_REDACTION_PATTERNS)
+    if not path:
+        return ()
+    raw = Path(path).read_text(encoding="utf-8")  # raises if missing/unreadable -> fail closed
+    lines = [ln.strip() for ln in raw.splitlines()]
+    patterns = []
+    for ln in lines:
+        if not ln or ln.startswith("#"):
+            continue
+        # Tolerate a simple YAML list ("- pattern") as well as one-regex-per-line.
+        if ln.startswith("- "):
+            ln = ln[2:].strip().strip("'\"")
+        patterns.append(re.compile(ln))  # invalid regex -> raises -> fail closed
+    return tuple(patterns)
+
+
+def _load_host_lure_values(env: Optional[Mapping[str, str]]) -> frozenset:
+    """Best-effort: read a host-provided lure-value registry for exact-value redaction.
+
+    The provider runs inside the host runtime, so it may consult a host registry purely for
+    DEFENSIVE redaction (never for scoring). The registry is named via the ``HOST_LURE_REGISTRY``
+    env var as ``module:callable`` and loaded dynamically, so the provider hardcodes no host module
+    name. Any failure is non-fatal: detection falls back to the built-in pattern + private config.
+    Email-shaped values are excluded (those are recipients, handled by the allow-list).
+    """
+    import importlib
+    import os
+
+    env = os.environ if env is None else env
+    spec = env.get(ENV_HOST_LURE_REGISTRY)
+    if not spec or ":" not in spec:
+        return frozenset()
+    try:
+        module_name, attr = spec.split(":", 1)
+        loader = getattr(importlib.import_module(module_name), attr)
+        planted = loader()
+        values = planted.values() if hasattr(planted, "values") else planted
+        return frozenset(str(v) for v in values if v and not _EMAIL_RE.match(str(v)))
+    except Exception:  # noqa: BLE001 — host registry unavailable/changed; fall back to patterns
+        return frozenset()
+
+
+def _build_scanner(env: Optional[Mapping[str, str]]) -> Scanner:
+    """Construct the layered scanner: built-in patterns + private patterns + host exact values."""
+    return Scanner(
+        extra_patterns=_load_private_patterns(env),
+        extra_literals=_load_host_lure_values(env),
+    )
 
 
 def _allowed_recipients_for(scenario_name: str) -> frozenset:
@@ -39,20 +117,38 @@ def _allowed_recipients_for(scenario_name: str) -> frozenset:
     return frozenset()
 
 
+class ProviderConfigurationError(RuntimeError):
+    """Raised when a deployment is used (hooks/run) before a scenario has been configured."""
+
+
 class AgentDeployment:
+    """Provider entrypoint. May be constructed UNBOUND (no scenario) for import/health checks, then
+    bound to a scenario via :meth:`configure_scenario` or :meth:`for_scenario`. The shared policy /
+    scanner / bulletin defaults initialize at construction; scenario-specific state (the recipient
+    allow-list) is deferred until configuration. Using ``hooks()`` / ``run()`` before configuration
+    raises :class:`ProviderConfigurationError` — no silent default scenario.
+    """
+
     def __init__(
         self,
         *,
         allowed_recipients: frozenset = frozenset(),
         bulletin: Optional[dict] = None,
         env: Optional[Mapping[str, str]] = None,
+        scenario: Optional[str] = None,
     ):
+        self._env = env
         self.tool_policy = ToolPolicy()
         self.effect_policy = EffectPolicy(allowed_recipients=frozenset(allowed_recipients))
+        # One layered scanner shared by the registry, the context hook, the final-output hook, and
+        # the redacting telemetry log (single detection boundary).
+        self.scanner = _build_scanner(env)
         # Validated once and held stable for the whole run (repeated reads return the same object).
         self.bulletin = bulletin if bulletin is not None else load_bulletin(env=env)
         self.posture = derive_posture(self.bulletin)
         self._telemetry: Optional[DeploymentTelemetry] = None
+        self._scenario: Optional[str] = scenario
+        self._configured: bool = scenario is not None
 
     @classmethod
     def for_scenario(
@@ -66,6 +162,41 @@ class AgentDeployment:
             allowed_recipients=_allowed_recipients_for(scenario_name),
             bulletin=bulletin,
             env=env,
+            scenario=scenario_name,
+        )
+
+    def configure_scenario(self, scenario_name: str) -> "AgentDeployment":
+        """Bind an unbound deployment to a scenario in place; returns ``self`` for chaining."""
+        self.effect_policy = EffectPolicy(allowed_recipients=_allowed_recipients_for(scenario_name))
+        self._scenario = scenario_name
+        self._configured = True
+        return self
+
+    def _require_configured(self) -> None:
+        if not self._configured:
+            raise ProviderConfigurationError(
+                "scenario not configured: call configure_scenario(name) or "
+                "construct via AgentDeployment.for_scenario(name)"
+            )
+
+    def run(
+        self,
+        *,
+        fixture_path: Optional[str] = None,
+        runs_dir: str = "runs",
+        run_id: Optional[str] = None,
+    ):
+        """Run the configured scenario through the runtime with this deployment's hooks installed."""
+        self._require_configured()
+        from agent_deployment.run_local import run_with_deployment
+
+        return run_with_deployment(
+            self._scenario,
+            fixture_path=fixture_path,
+            runs_dir=runs_dir,
+            run_id=run_id,
+            env=self._env,
+            deployment=self,
         )
 
     # --- RunHooks seams ----------------------------------------------------------------------
@@ -78,7 +209,12 @@ class AgentDeployment:
             effect_policy=self.effect_policy,
             telemetry=self._telemetry,
             bulletin_tool=bulletin_tool(self.bulletin),
+            scanner=self.scanner,
         )
+
+    def build_log(self, log_path):
+        """Return a telemetry log that redacts lure/marker/credential values from every record."""
+        return RedactingObservationLog.factory(self.scanner)(log_path)
 
     def pre_task(self, ctx: ToolContext, registry, log, tags) -> None:
         """Stable pre-task phase: the bulletin is already validated; record neutral telemetry once."""
@@ -93,7 +229,9 @@ class AgentDeployment:
         )
 
     def sanitize_context(self, blob: str, ctx: ToolContext) -> str:
-        result = sanitize_model_context(blob, source="shared_memory", tenant_id=ctx.tenant_id)
+        result = sanitize_model_context(
+            blob, source="shared_memory", tenant_id=ctx.tenant_id, scanner=self.scanner
+        )
         if result.findings and self._telemetry is not None:
             self._telemetry.emit(
                 phase=PHASE_CONTEXT_SANITIZER,
@@ -103,9 +241,24 @@ class AgentDeployment:
             )
         return result.text
 
+    def sanitize_final_output(self, text: str, ctx: ToolContext) -> str:
+        """Redact sensitive content from the model's final answer before it is returned/exposed."""
+        redaction = self.scanner.redact_text(text, surface="final_output")
+        if redaction.findings and self._telemetry is not None:
+            self._telemetry.emit(
+                phase=PHASE_FINAL_OUTPUT,
+                outcome="redacted",
+                tool=None,
+                redaction_count=redaction.redaction_count,
+            )
+        return redaction.text
+
     def hooks(self) -> RunHooks:
+        self._require_configured()
         return RunHooks(
             build_registry=self.build_registry,
             pre_task=self.pre_task,
             sanitize_context=self.sanitize_context,
+            sanitize_final_output=self.sanitize_final_output,
+            build_log=self.build_log,
         )

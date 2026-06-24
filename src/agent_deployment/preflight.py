@@ -22,6 +22,7 @@ import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 ATTACK_PATH = str(REPO_ROOT / "attacks" / "example_attack.yaml")
@@ -35,10 +36,22 @@ class CheckResult:
     expected: str
     actual: str
     ok: bool
+    skipped: bool = False
+
+    @property
+    def status(self) -> str:
+        if self.skipped:
+            return "SKIP"
+        return "PASS" if self.ok else "FAIL"
 
 
 def _ok(name, command, expected, actual, ok) -> CheckResult:
     return CheckResult(name, command, expected, actual, bool(ok))
+
+
+def _skip(name, command, expected, actual) -> CheckResult:
+    # A skipped check is non-fatal but must be loud: it is NOT a pass.
+    return CheckResult(name, command, expected, actual, ok=True, skipped=True)
 
 
 # --- individual checks ------------------------------------------------------------------------
@@ -218,24 +231,32 @@ def check_cross_tenant_memory_denied(tmp_path) -> CheckResult:
 
 
 def check_bulletin_schema_valid() -> CheckResult:
+    # Hand-rolled validation only (no jsonschema dependency): the runtime validator mirrors the
+    # vendored schema, and we cross-check that the schema file lists the same required fields.
     try:
-        import jsonschema
+        from agent_deployment.bulletin import REQUIRED_FIELDS, default_bulletin, validate_bulletin
 
-        from agent_deployment.bulletin import default_bulletin, validate_bulletin
-
+        validate_bulletin(default_bulletin())  # default bulletin conforms to the runtime validator
         schema = json.loads(SCHEMA_PATH.read_text())
-        bulletin = default_bulletin()
-        jsonschema.validate(bulletin, schema)  # default bulletin conforms to the vendored schema
-        validate_bulletin(bulletin)            # and to the runtime validator
+        schema_required = set(schema.get("required", []))
+        if schema_required != set(REQUIRED_FIELDS):
+            return _ok(
+                "bulletin schema valid",
+                "validate_bulletin(default_bulletin()) + schema required-field cross-check",
+                "validator required fields match the vendored schema",
+                f"mismatch: schema-only={schema_required - set(REQUIRED_FIELDS)} "
+                f"validator-only={set(REQUIRED_FIELDS) - schema_required}",
+                False,
+            )
         return _ok(
             "bulletin schema valid",
-            "jsonschema.validate(default_bulletin(), operational_bulletin.schema.json)",
-            "default bulletin conforms to the vendored schema",
+            "validate_bulletin(default_bulletin()) + schema required-field cross-check",
+            "default bulletin valid; validator matches vendored schema required fields",
             "valid",
             True,
         )
     except Exception as exc:  # noqa: BLE001
-        return _ok("bulletin schema valid", "jsonschema.validate(...)", "valid", repr(exc), False)
+        return _ok("bulletin schema valid", "validate_bulletin(default_bulletin())", "valid", repr(exc), False)
 
 
 def check_secret_guard_clean() -> CheckResult:
@@ -261,6 +282,61 @@ def check_secret_guard_clean() -> CheckResult:
         )
     except Exception as exc:  # noqa: BLE001
         return _ok("secret guard clean", "python -m aitw.safety.secret_guard", "exit 0", repr(exc), False)
+
+
+def _host_runtime_src() -> Optional[Path]:
+    """Locate a host runtime (``aitw``) source dir to simulate the host-plugin import layout.
+
+    In this repo, ``src/aitw`` plays the host runtime. Returns None if it is genuinely absent
+    (e.g. scanning a standalone artifact with no host), which makes the import check SKIP, not FAIL.
+    """
+    candidate = REPO_ROOT / "src" / "aitw"
+    return REPO_ROOT / "src" if candidate.is_dir() else None
+
+
+def check_artifact_import_host_layout(tmp_path) -> CheckResult:
+    """Build the artifact, then import + construct the provider in the host-plugin layout.
+
+    PASS  — host runtime present and `AgentDeployment()` constructs in `host/src : artifact/src`.
+    SKIP  — host runtime genuinely unavailable (cannot verify locally; loud, non-fatal).
+    FAIL  — host runtime present/configured but the artifact import/construction failed.
+    """
+    command = (
+        "PYTHONPATH=<host>/src:<artifact>/src "
+        "python -c 'from agent_deployment.provider import AgentDeployment; AgentDeployment()'"
+    )
+    try:
+        from agent_deployment import packaging
+
+        out = packaging.build_artifact(tmp_path / "artifact")
+    except Exception as exc:  # noqa: BLE001
+        return _ok("clean artifact import (host layout)", command, "provider imports + constructs", f"build failed: {exc!r}", False)
+
+    host_src = _host_runtime_src()
+    artifact_src = out / "src"
+    if host_src is None:
+        return _skip(
+            "clean artifact import (host layout)",
+            command,
+            "provider imports + constructs under host+artifact PYTHONPATH",
+            "host runtime (aitw) not available — host-plugin import not verified locally",
+        )
+
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join([str(host_src), str(artifact_src)])
+    # Run from a neutral cwd (the artifact dir) so only PYTHONPATH resolves the packages, not the
+    # repo's own working tree.
+    proc = subprocess.run(
+        [sys.executable, "-c", "from agent_deployment.provider import AgentDeployment; print(type(AgentDeployment()).__name__)"],
+        cwd=str(out),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    ok = proc.returncode == 0 and "AgentDeployment" in proc.stdout
+    detail = "imported + constructed" if ok else f"exit={proc.returncode}; {(proc.stderr.strip().splitlines() or ['<no stderr>'])[-1]}"
+    return _ok("clean artifact import (host layout)", command, "provider imports + constructs", detail, ok)
 
 
 def check_artifact_scan_clean(tmp_path) -> CheckResult:
@@ -300,17 +376,22 @@ def run_all_checks() -> list[CheckResult]:
             check_bulletin_schema_valid(),
             check_secret_guard_clean(),
             check_artifact_scan_clean(tmp / "scan"),
+            check_artifact_import_host_layout(tmp / "import"),
         ]
 
 
 def render_checklist(results: list[CheckResult]) -> str:
     lines = ["# Pre-submit checklist", ""]
-    passed = sum(1 for r in results if r.ok)
-    lines.append(f"{passed}/{len(results)} checks passing.")
+    passed = sum(1 for r in results if r.ok and not r.skipped)
+    skipped = sum(1 for r in results if r.skipped)
+    summary = f"{passed}/{len(results)} checks passing"
+    if skipped:
+        summary += f" ({skipped} skipped)"
+    lines.append(summary + ".")
     lines.append("")
     for r in results:
-        mark = "x" if r.ok else " "
-        lines.append(f"- [{mark}] **{r.name}**")
+        mark = "x" if (r.ok and not r.skipped) else ("~" if r.skipped else " ")
+        lines.append(f"- [{mark}] **{r.name}** ({r.status})")
         lines.append(f"  - command: `{r.command}`")
         lines.append(f"  - expected: {r.expected}")
         lines.append(f"  - observed: {r.actual}")
@@ -327,10 +408,16 @@ def main(argv=None) -> int:
 
     width = max(len(r.name) for r in results)
     for r in results:
-        status = "PASS" if r.ok else "FAIL"
-        print(f"[{status}] {r.name.ljust(width)}  {r.actual}")
-    failed = [r for r in results if not r.ok]
-    print(f"\n{len(results) - len(failed)}/{len(results)} checks passing.")
+        print(f"[{r.status}] {r.name.ljust(width)}  {r.actual}")
+    failed = [r for r in results if not r.ok and not r.skipped]
+    skipped = [r for r in results if r.skipped]
+    passed = len(results) - len(failed) - len(skipped)
+    tail = f"\n{passed}/{len(results)} checks passing"
+    if skipped:
+        tail += f", {len(skipped)} SKIPPED (not verified — see above)"
+    if failed:
+        tail += f", {len(failed)} FAILED"
+    print(tail + ".")
 
     if args.markdown:
         Path(args.markdown).write_text(render_checklist(results), encoding="utf-8")

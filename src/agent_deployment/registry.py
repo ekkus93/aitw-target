@@ -22,10 +22,12 @@ from aitw.tools.registry import Tool, ToolContext, ToolRegistry
 from agent_deployment.external_effects import EffectPolicy
 from agent_deployment.memory_policy import scoped_memory_tool
 from agent_deployment.policy import ToolPolicy
-from agent_deployment.scanner import redact_text
+from agent_deployment.policy_engine import ProviderPolicy
+from agent_deployment.scanner import Scanner
 from agent_deployment.telemetry import (
     PHASE_EXTERNAL_EFFECT,
     PHASE_MEMORY_POLICY,
+    PHASE_SCANNER,
     PHASE_TOOL_POLICY,
     DeploymentTelemetry,
 )
@@ -33,8 +35,12 @@ from agent_deployment.telemetry import (
 # Effect tools whose calls are validated by the EffectPolicy before they run.
 _EFFECT_TOOLS = frozenset({"send_email", "scheduler", "http_fetch", "file_io"})
 
-# Tools whose output is untrusted data and must be neutralized before returning to the model.
-_UNTRUSTED_OUTPUT_TOOLS = frozenset({"shared_memory", "read_notice_board", "web_search"})
+# Tools whose output is untrusted data and must be neutralized before returning to the model. The
+# operational-bulletin output is included: even though it is schema-validated, an injected bulletin
+# must not carry control markers / lure tokens to the model.
+_UNTRUSTED_OUTPUT_TOOLS = frozenset(
+    {"shared_memory", "read_notice_board", "web_search", "read_operational_bulletin"}
+)
 
 
 class PolicyRegistry(ToolRegistry):
@@ -46,10 +52,15 @@ class PolicyRegistry(ToolRegistry):
         effect_policy: EffectPolicy,
         telemetry: Optional[DeploymentTelemetry] = None,
         bulletin_tool: Optional[Tool] = None,
+        scanner: Optional[Scanner] = None,
     ):
         super().__init__(ctx)
         self.tool_policy = tool_policy
         self.effect_policy = effect_policy
+        # Central boundary: tool/effect/memory authorization and all scanning route through here.
+        self.policy = ProviderPolicy(
+            tool_policy=tool_policy, effect_policy=effect_policy, scanner=scanner
+        )
         self.telemetry = telemetry or DeploymentTelemetry()
         self._register_tools(bulletin_tool)
 
@@ -82,7 +93,7 @@ class PolicyRegistry(ToolRegistry):
         args = args or {}
 
         # 1. Tool allow-list enforcement (covers off-list and never-available tools).
-        decision = self.tool_policy.validate_tool_call(name, args, ctx=self.ctx)
+        decision = self.policy.authorize_tool_call(self.ctx, name, args)
         if not decision.allowed:
             self.telemetry.emit(
                 phase=PHASE_TOOL_POLICY, outcome="denied", tool=name, reason=decision.reason
@@ -92,9 +103,9 @@ class PolicyRegistry(ToolRegistry):
         if name not in self._tools:
             raise KeyError(f"unknown tool: {name}")
 
-        # 2. External-effect validation before the underlying effect tool runs.
+        # 2. External-effect validation (recipient/egress) before the effect tool runs.
         if name in _EFFECT_TOOLS:
-            effect = self.effect_policy.validate_effect(name, args, ctx=self.ctx)
+            effect = self.policy.authorize_external_effect(self.ctx, name, args)
             self.telemetry.emit(
                 phase=PHASE_EXTERNAL_EFFECT,
                 outcome="allowed" if effect.allowed else "denied",
@@ -104,6 +115,25 @@ class PolicyRegistry(ToolRegistry):
             if not effect.allowed:
                 return f"DENIED: {effect.reason}"
 
+            # 2b. Content scan of the effect args BEFORE the sink is mutated. A sensitive marker in
+            # a URL-like egress is denied; otherwise the args are redacted in place so the mock sink
+            # only ever sees neutralized content (the action still completes).
+            scan = self.policy.scan_effect_args(self.ctx, name, args)
+            if scan.action == "deny":
+                self.telemetry.emit(
+                    phase=PHASE_EXTERNAL_EFFECT, outcome="denied", tool=name, reason=scan.reason
+                )
+                return f"DENIED: {scan.reason}"
+            if scan.action == "redact":
+                self.telemetry.emit(
+                    phase=PHASE_SCANNER,
+                    outcome="redacted",
+                    tool=name,
+                    reason=scan.reason,
+                    redaction_count=scan.redaction_count,
+                )
+                args = scan.args
+
         # 3. Run the tool, reusing the runtime's tool-result size cap.
         result = self._tools[name].func(args, self.ctx)
         if isinstance(result, str):
@@ -111,12 +141,13 @@ class PolicyRegistry(ToolRegistry):
             if marker:
                 self.ctx.truncations.append({"kind": "tool_result", "tool": name, **marker})
 
-        # 4. Neutralize untrusted tool output (control markers / secrets / lure tokens).
+        # 4. Neutralize untrusted tool output (control markers / secrets / lure tokens) before it
+        # is returned to the model.
         if name in _UNTRUSTED_OUTPUT_TOOLS and isinstance(result, str):
-            redaction = redact_text(result, surface="tool_result")
+            redaction = self.policy.scan_output(self.ctx, "tool_result", result)
             if redaction.findings:
                 self.telemetry.emit(
-                    phase="context_sanitizer",
+                    phase=PHASE_SCANNER,
                     outcome="redacted",
                     tool=name,
                     redaction_count=redaction.redaction_count,

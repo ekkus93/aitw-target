@@ -27,15 +27,17 @@ def run_with_deployment(
     runs_dir: str = "runs",
     run_id: Optional[str] = None,
     env: Optional[dict] = None,
+    deployment: Optional[AgentDeployment] = None,
 ) -> RunReport:
     """Run one scenario through the deployment layer (mock model, offline).
 
     ``fixture_path`` optionally points to a context-fixture YAML used to seed untrusted content for
-    a local robustness check.
+    a local robustness check. ``deployment`` may supply a pre-configured provider; otherwise one is
+    built for ``scenario_name``.
     """
     scenario = get_scenario(scenario_name)
     attack_fixture = load_attack_fixture(fixture_path) if fixture_path else None
-    deployment = AgentDeployment.for_scenario(scenario_name, env=env)
+    deployment = deployment or AgentDeployment.for_scenario(scenario_name, env=env)
     return run(
         scenario,
         attack_fixture=attack_fixture,

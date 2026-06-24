@@ -32,6 +32,14 @@ def test_deployed_excerpt_shows_a_block_or_redaction_and_clean_end(tmp_path):
     assert any(r.get("outcome") == "end" and r.get("compromised") is False for r in excerpt)
 
 
+def test_excerpts_have_no_duplicate_records(tmp_path):
+    ev = generate_evidence(runs_dir=tmp_path)
+    for arm in ("baseline", "deployed"):
+        excerpt = ev[arm]["excerpt"]
+        keys = [json.dumps(r, sort_keys=True, default=str) for r in excerpt]
+        assert len(keys) == len(set(keys)), f"{arm} excerpt has duplicate records"
+
+
 def test_markdown_renders(tmp_path):
     ev = generate_evidence(runs_dir=tmp_path)
     md = _render_markdown(ev)

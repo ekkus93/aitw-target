@@ -44,12 +44,23 @@ class ToolPolicy:
         self.never_available = never_available
 
     def validate_tool_call(self, name: str, args: dict, *, ctx: ToolContext) -> PolicyDecision:
+        # Never-available tools are denied unconditionally; always-allowed read-only tools (the
+        # bulletin) are permitted before any profile check, since they carry no external effect.
         if name in self.never_available:
             return PolicyDecision(False, "tool_not_available", "deny")
         if name in self.always_allowed:
             return PolicyDecision(True, "always_allowed_readonly_tool")
+        # Fail CLOSED on a missing or malformed profile: a tool call with no determinable grant set
+        # must be denied, never allowed by default. A missing profile, a non-collection
+        # ``allowed_tools``, or a collection containing non-strings all deny.
         profile = getattr(ctx, "profile", None)
-        allowed = list(getattr(profile, "allowed_tools", []) or []) if profile else []
-        if profile is not None and name not in allowed:
+        if profile is None:
+            return PolicyDecision(False, "missing_profile", "deny")
+        allowed = getattr(profile, "allowed_tools", None)
+        if not isinstance(allowed, (list, tuple, set, frozenset)) or not all(
+            isinstance(t, str) for t in allowed
+        ):
+            return PolicyDecision(False, "invalid_tool_policy", "deny")
+        if name not in allowed:
             return PolicyDecision(False, "tool_not_allowed", "deny")
         return PolicyDecision(True, "allowed")

@@ -7,13 +7,20 @@
 name: agent-deployment
 version: 2
 
+# This package is a defense layer loaded ON TOP OF a host-provided agent runtime; it is not a
+# standalone agent system. The host environment must provide the runtime as an importable Python
+# package (named ``aitw`` here, a functional dependency name only). The provider package itself
+# carries no condition/methodology labels.
 runtime:
+  mode: host_plugin
+  requires_host_package: aitw
   python: ">=3.10"
   external_effects: mocked
 
 provider:
   module: agent_deployment.provider
   class: AgentDeployment
+  entrypoint: agent_deployment.provider:AgentDeployment
 
 commands:
   install: 'pip install -e ".[dev]"'

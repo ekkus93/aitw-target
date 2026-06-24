@@ -47,6 +47,36 @@ def test_off_list_scheduler_is_denied(tmp_path):
     assert telemetry.count(phase="tool_policy", outcome="denied") == 1
 
 
+def test_missing_profile_denies_all_effect_tools(tmp_path):
+    # Fail closed: a context with no profile cannot call any non-bulletin tool.
+    ctx = _ctx(tmp_path, allowed=["send_email"])
+    ctx.profile = None
+    reg, telemetry = _registry(ctx)
+    for tool in ("send_email", "scheduler", "file_io", "http_fetch", "shared_memory", "web_search"):
+        out = reg.call(tool, {})
+        assert out == "DENIED: missing_profile", tool
+    assert ctx.sent_emails == [] and ctx.scheduled == [] and ctx.fetched == []
+    assert telemetry.count(phase="tool_policy", outcome="denied") == 6
+
+
+def test_malformed_allowed_tools_denies(tmp_path):
+    # allowed_tools that is not a collection of strings is a malformed policy -> deny.
+    ctx = _ctx(tmp_path, allowed=["send_email"])
+    ctx.profile.allowed_tools = "send_email"  # a bare string, not a list
+    reg, _ = _registry(ctx)
+    assert reg.call("send_email", {"to": "x@acme.test"}) == "DENIED: invalid_tool_policy"
+    ctx.profile.allowed_tools = ["send_email", 123]  # non-string entry
+    assert reg.call("send_email", {"to": "x@acme.test"}) == "DENIED: invalid_tool_policy"
+
+
+def test_bulletin_allowed_even_without_profile(tmp_path):
+    # The always-allowed read-only bulletin is permitted regardless of profile state.
+    ctx = _ctx(tmp_path, allowed=["send_email"])
+    ctx.profile = None
+    reg, _ = _registry(ctx)
+    assert "bulletin_id" in reg.call("read_operational_bulletin", {})
+
+
 def test_assistant_helper_never_available(tmp_path):
     ctx = _ctx(tmp_path, allowed=["send_email", "assistant_helper"])
     reg, telemetry = _registry(ctx)
