@@ -133,3 +133,43 @@ def test_unapproved_marker_reports_its_line_number():
     violations = secret_guard.evaluate_file("docs/x.md", text)
     marker = next(v for v in violations if v[1] == "unauthorized-suppression-marker")
     assert marker[0] == 3
+
+
+# --- no-git fallback enumeration (zip checkout robustness) -------------------------------------
+
+
+def _make_repo_like_tree(root: Path) -> None:
+    (root / "src" / "pkg").mkdir(parents=True)
+    (root / "src" / "pkg" / "real.py").write_text("x = 1\n", encoding="utf-8")
+    (root / "src" / "pkg" / "__pycache__").mkdir()
+    (root / "src" / "pkg" / "__pycache__" / "real.cpython-310.pyc").write_text("c\n", encoding="utf-8")
+    (root / ".pytest_cache" / "v").mkdir(parents=True)
+    (root / ".pytest_cache" / "lastfailed").write_text("test_x[token-ish-node]\n", encoding="utf-8")
+    (root / "dist").mkdir()
+    (root / "dist" / "artifact.txt").write_text("built\n", encoding="utf-8")
+
+
+def test_fallback_ignores_generated_and_cache_dirs(tmp_path):
+    _make_repo_like_tree(tmp_path)
+    rels = {p.relative_to(tmp_path).as_posix() for p in secret_guard._fallback_files(tmp_path)}
+    assert "src/pkg/real.py" in rels                       # real source still enumerated
+    assert not any(".pytest_cache" in r for r in rels)
+    assert not any("__pycache__" in r for r in rels)
+    assert not any(r.startswith("dist/") for r in rels)
+
+
+def test_is_fallback_ignored_targets_only_generated(tmp_path):
+    _make_repo_like_tree(tmp_path)
+    assert secret_guard._is_fallback_ignored(tmp_path / ".pytest_cache" / "lastfailed", tmp_path)
+    assert secret_guard._is_fallback_ignored(
+        tmp_path / "src" / "pkg" / "__pycache__" / "real.cpython-310.pyc", tmp_path
+    )
+    assert not secret_guard._is_fallback_ignored(tmp_path / "src" / "pkg" / "real.py", tmp_path)
+
+
+def test_detection_unchanged_token_in_source_still_flagged():
+    # The enumeration change must not weaken detection: a token-shaped value in a SOURCE file is
+    # still flagged by the content scanner. (Built from fragments so this file stays guard-clean.)
+    fake = "AK" + "IA" + "ABCDEFGHIJKLMNOP"  # AWS-access-key-id shape at runtime only
+    violations = secret_guard.scan_text(f'KEY = "{fake}"')
+    assert any(label == "aws-access-key-id" for _, label, _ in violations)

@@ -39,7 +39,7 @@ from pathlib import Path
 
 try:  # pyyaml is a project dependency; degrade loudly rather than crash if missing.
     import yaml
-except Exception:  # pragma: no cover - exercised only without pyyaml installed
+except ImportError:  # pragma: no cover - exercised only without pyyaml installed
     yaml = None
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -151,6 +151,39 @@ def load_local_patterns():
     return list(data.get("extra_disallowed_patterns", []))
 
 
+# Generated/build/cache directories that a normal git checkout already excludes via .gitignore.
+# In a no-git zip checkout there is no git to consult, so the rglob fallback skips these explicitly;
+# otherwise files like .pytest_cache test-node IDs (which can embed token-shaped strings) would
+# cause false positives. Source directories are NOT in this set — only generated/cache/build dirs.
+_FALLBACK_IGNORED_DIRS = {
+    ".git",
+    ".pytest_cache",
+    "__pycache__",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".tox",
+    ".venv",
+    "venv",
+    "dist",
+    "build",
+    "node_modules",
+}
+
+
+def _is_fallback_ignored(path: Path, root: Path) -> bool:
+    """True if any path component under ``root`` is a generated/cache/build dir we skip in fallback."""
+    return any(part in _FALLBACK_IGNORED_DIRS for part in path.relative_to(root).parts)
+
+
+def _fallback_files(root: Path) -> list:
+    """No-git enumeration: every file under ``root`` except generated/cache/build dirs.
+
+    Approximates ``git ls-files -co --exclude-standard`` (which respects .gitignore) for a checkout
+    that has no git metadata, so local validation of an unpacked zip is not derailed by cache files.
+    """
+    return [p for p in root.rglob("*") if p.is_file() and not _is_fallback_ignored(p, root)]
+
+
 def _tracked_files():
     """Tracked + untracked-but-not-gitignored files (i.e. what would go public)."""
     try:
@@ -162,8 +195,9 @@ def _tracked_files():
             check=True,
         ).stdout
         return [REPO_ROOT / line for line in out.splitlines() if line.strip()]
-    except Exception:  # pragma: no cover - fallback when not a git repo
-        return [p for p in REPO_ROOT.rglob("*") if p.is_file() and ".git" not in p.parts]
+    except (OSError, subprocess.SubprocessError):
+        # git listing unavailable (no git executable / nonzero exit / timeout): use no-git fallback.
+        return _fallback_files(REPO_ROOT)
 
 
 def _read(path):

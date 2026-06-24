@@ -6,6 +6,7 @@ soft-imports it and falls back to ``object``; a sentinel base is injected via sy
 the adapter subclasses whatever base the host provides.
 """
 
+import json
 import sys
 import types
 
@@ -407,3 +408,88 @@ def test_recipients_fail_closed_when_fixtures_raise(tmp_path, monkeypatch):
     reg = DEPLOYMENT.task_registry(ctx)
     assert reg.call("send_email", {"to": "customer@acme.test", "body": "x"}).startswith("DENIED")
     assert ctx.sent_emails == []
+
+
+# --- structured-payload scanner (recursive, fail-closed) --------------------------------------
+
+
+def test_scan_dict_finds_nested_lure():
+    sa = ScannerAdapter()
+    assert sa.scan({"body": f"see {PLANTED}"})        # finding(s) present, not a silent []
+    assert sa.check({"body": PLANTED}) is True
+
+
+def test_redact_dict_redacts_value_preserves_keys():
+    sa = ScannerAdapter()
+    out = sa.redact({"body": f"x {PLANTED} y", "ok": "fine"})
+    assert isinstance(out, dict) and set(out) == {"body", "ok"}
+    assert PLANTED not in out["body"]
+    assert out["ok"] == "fine"
+
+
+def test_scan_and_redact_list_and_tuple():
+    sa = ScannerAdapter()
+    assert sa.scan(["safe", PLANTED])
+    rl = sa.redact(["safe", PLANTED])
+    assert isinstance(rl, list) and rl[0] == "safe" and PLANTED not in rl[1]
+    rt = sa.redact(("safe", PLANTED))
+    assert isinstance(rt, tuple) and PLANTED not in rt[1]
+
+
+def test_scan_and_redact_set_and_frozenset():
+    sa = ScannerAdapter()
+    assert sa.scan({PLANTED})
+    rs = sa.redact({PLANTED, "safe"})
+    assert isinstance(rs, set) and all(PLANTED not in v for v in rs)
+    rf = sa.redact(frozenset({PLANTED}))
+    assert isinstance(rf, frozenset) and all(PLANTED not in v for v in rf)
+
+
+def test_nested_structures_fully_redacted():
+    sa = ScannerAdapter()
+    payload = {"outer": [{"inner": PLANTED}, "safe"], "tags": ("t", PLANTED)}
+    out = sa.redact(payload)
+    assert PLANTED not in json.dumps(out)   # no raw lure survives anywhere in the structure
+    assert sa.scan(payload)
+
+
+def test_structured_injection_and_credential_detected():
+    sa = ScannerAdapter()
+    assert sa.scan({"a": "INJECT:: do bad things now"})
+    cred = "sk-" + "ant-api03-" + "Z" * 24      # provider-key shape at runtime only
+    assert sa.scan(["note", cred])
+    assert cred not in sa.redact(["note", cred])[1]
+
+
+def test_benign_structured_payload_no_findings_and_preserved():
+    sa = ScannerAdapter()
+    payload = {"greeting": "hello", "items": [1, 2, 3], "ok": True, "none": None}
+    assert sa.scan(payload) == []
+    assert sa.redact(payload) == payload
+
+
+def test_scalars_preserved():
+    sa = ScannerAdapter()
+    assert sa.redact(5) == 5 and sa.redact(None) is None and sa.redact(True) is True
+    assert sa.scan(12345) == [] and sa.scan(None) == []
+
+
+def test_unknown_object_fails_closed():
+    class _Weird:
+        def __init__(self):
+            self.secret = PLANTED
+
+        def __str__(self):
+            return self.secret
+
+    sa = ScannerAdapter()
+    obj = _Weird()
+    assert sa.redact(obj) == "[redacted:unsupported_payload]"
+    assert any(f.kind == "unsupported_payload" for f in sa.scan(obj))
+
+
+def test_failing_scanner_on_structured_payload_fails_closed():
+    sa = ScannerAdapter(_BoomScanner())
+    out = sa.redact({"body": PLANTED, "nested": [PLANTED]})
+    assert PLANTED not in json.dumps(out)                       # no raw nested string survives
+    assert any(f.kind == "scanner_error" for f in sa.scan({"body": PLANTED}))

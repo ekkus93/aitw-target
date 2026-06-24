@@ -40,6 +40,14 @@ _HOST_REDACT_METHODS = ("redact_text", "redact", "guard")
 # value. Surfaced alongside a synthetic ``scanner_error`` finding so the failure stays visible.
 _SCANNER_ERROR_MARKER = "[redacted:scanner_error]"
 
+# Fail-closed sentinel for a payload shape we cannot safely introspect/redact (an arbitrary object
+# that is not a str / known container / scalar). We never return such an object unchanged, since it
+# could carry or later stringify into raw sensitive content.
+_UNSUPPORTED_PAYLOAD_MARKER = "[redacted:unsupported_payload]"
+
+# Scalar types that cannot carry nested string content and are safe to preserve as-is.
+_SAFE_SCALARS = (bool, int, float, type(None))
+
 # Faults a scanner/redactor (ours or a host-provided one) can plausibly raise. We catch this
 # explicit set — not a blind ``except Exception`` — so a scan/redact failure FAILS CLOSED (safe
 # marker / ``scanner_error`` finding) while a genuinely unexpected error type still propagates (fail
@@ -142,10 +150,17 @@ class ScannerAdapter:
     """Broad-compatibility wrapper around the central :class:`Scanner`.
 
     Returned by :meth:`Deployment.make_scanner` so the host can call whatever simple scan/redact
-    method name it expects. Every method is non-crashing and FAILS CLOSED: a scan that raises yields
-    a synthetic ``scanner_error`` finding (never an empty all-clear), and a redaction that raises
-    yields the ``[redacted:scanner_error]`` marker (never the raw input). It never returns or prints
-    a raw detected value.
+    method name it expects, on either a plain string or a structured payload. Every method is
+    non-crashing and FAILS CLOSED:
+
+      * ``scan``/``redact`` recurse over ``str``/``dict``/``list``/``tuple``/``set``/``frozenset``;
+      * safe scalars (``None``/``bool``/``int``/``float``) are preserved unchanged;
+      * an un-introspectable object yields an ``unsupported_payload`` finding (scan) or the
+        ``[redacted:unsupported_payload]`` marker (redact) — never passed through unchanged;
+      * a scan that raises yields a synthetic ``scanner_error`` finding (never an empty all-clear);
+        a redaction that raises yields ``[redacted:scanner_error]`` (never the raw input).
+
+    It never returns or prints a raw detected value.
     """
 
     def __init__(self, scanner: Optional[Scanner] = None):
@@ -163,20 +178,56 @@ class ScannerAdapter:
         except _SCANNER_FAULTS:  # fail closed: never echo the raw input on failure
             return _SCANNER_ERROR_MARKER
 
-    # Generic positional-surface aliases the host might use instead.
-    def scan(self, payload, surface: str = "unknown"):
-        return self.scan_text(payload, surface=surface) if isinstance(payload, str) else []
+    # Generic aliases the host might use instead. ``surface`` is positional-or-keyword so a host may
+    # call ``redact(payload, "telemetry")`` or ``redact(payload, surface="telemetry")``. Structured
+    # payloads are scanned/redacted RECURSIVELY and FAIL CLOSED: a container is never returned with a
+    # raw sensitive string still inside, and an un-introspectable object is replaced with a marker
+    # rather than passed through.
+    def scan(self, payload, surface: str = "unknown") -> list:
+        if isinstance(payload, str):
+            return self.scan_text(payload, surface=surface)
+        if isinstance(payload, _SAFE_SCALARS):
+            return []
+        if isinstance(payload, dict):
+            return self._scan_iter(payload.values(), surface)
+        if isinstance(payload, (list, tuple, set, frozenset)):
+            return self._scan_iter(payload, surface)
+        # Unknown object: fail closed (a missing finding would be a false all-clear).
+        return [Finding("unsupported_payload", surface, 1)]
 
     def redact(self, payload, surface: str = "unknown"):
-        if not isinstance(payload, str):
+        if isinstance(payload, str):
+            return self.redact_text(payload, surface=surface)
+        if isinstance(payload, _SAFE_SCALARS):
             return payload
-        return self.redact_text(payload, surface=surface)
+        try:
+            if isinstance(payload, dict):
+                return {k: self.redact(v, surface) for k, v in payload.items()}
+            if isinstance(payload, list):
+                return [self.redact(v, surface) for v in payload]
+            if isinstance(payload, tuple):
+                return tuple(self.redact(v, surface) for v in payload)
+            if isinstance(payload, frozenset):
+                return frozenset(self.redact(v, surface) for v in payload)
+            if isinstance(payload, set):
+                return {self.redact(v, surface) for v in payload}
+        except _SCANNER_FAULTS:
+            # Rebuilding this branch failed: fail closed rather than return raw data.
+            return _SCANNER_ERROR_MARKER
+        # Unknown object we cannot safely introspect/redact: never pass it through unchanged.
+        return _UNSUPPORTED_PAYLOAD_MARKER
 
     def guard(self, payload, surface: str = "unknown"):
         return self.redact(payload, surface=surface)
 
     def check(self, payload, surface: str = "unknown") -> bool:
         return bool(self.scan(payload, surface=surface))
+
+    def _scan_iter(self, values, surface: str) -> list:
+        findings: list = []
+        for value in values:
+            findings.extend(self.scan(value, surface))
+        return findings
 
 
 def _host_redactors(obj) -> list:
