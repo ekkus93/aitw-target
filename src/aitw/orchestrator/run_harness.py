@@ -22,6 +22,7 @@ import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable
 
 from aitw.agent.adapters.anthropic_adapter import DEFAULT_MODEL, AnthropicAdapter
 from aitw.agent.adapters.base import AdapterError
@@ -100,6 +101,32 @@ def _prepare_run_artifacts(runs_dir: Path, run_id: str) -> tuple[Path, Path]:
 
     workspace.mkdir(parents=True, exist_ok=False)
     return log_path, workspace
+
+
+@dataclass
+class RunHooks:
+    """Optional, narrow extension points for an external policy/deployment layer.
+
+    Every field defaults to None; when all are None, ``run()`` behaves EXACTLY as it did before
+    these seams existed (asserted by the existing run-harness tests, which pass ``hooks=None``).
+    A policy layer supplies its implementations without forking the run loop, and the existing
+    scoring / telemetry / scenarios / adapters are reused unchanged.
+
+    Seams (called only when non-None):
+      * ``build_registry(ctx, log, tags) -> ToolRegistry`` — replaces ``default_registry(ctx)``;
+        a policy-enforcing registry can apply a tool allow-list, scope shared memory, validate
+        external effects, sanitize tool output, and emit additive telemetry through ``log``.
+      * ``pre_task(ctx, registry, log, tags) -> None`` — a stable pre-task phase (e.g. read +
+        validate an operational bulletin and emit neutral telemetry) run after the registry is
+        built and before the first ordinary task step.
+      * ``sanitize_context(blob, ctx) -> str`` — applied to the raw ``_context_blob`` output
+        BEFORE the model sees it (untrusted shared context reaches the model here, not via a tool
+        call), so it can be marked as data and any control tokens it carries neutralized.
+    """
+
+    build_registry: Callable[..., object] | None = None
+    pre_task: Callable[..., None] | None = None
+    sanitize_context: Callable[[str, ToolContext], str] | None = None
 
 
 @dataclass
@@ -234,8 +261,10 @@ def run(
     runs_dir: str | Path = "runs",
     run_id: str | None = None,
     egress_allowlist: list[str] | None = None,
+    hooks: RunHooks | None = None,
 ) -> RunReport:
     model_config = model_config or {"adapter": "mock"}
+    hooks = hooks or RunHooks()
     # Validate BEFORE constructing any path or creating any directory, so a malicious id never
     # touches the filesystem. Generated ids must pass the same validator.
     run_id = _validate_run_id(run_id or _now_id(scenario.name))
@@ -308,13 +337,26 @@ def run(
             raise
 
         try:
-            registry = default_registry(ctx)
+            # Default None -> the standard registry. A policy layer may supply a registry that
+            # enforces an allow-list, scopes memory, validates effects, and sanitizes output.
+            if hooks.build_registry is not None:
+                registry = hooks.build_registry(ctx, log, tags)
+            else:
+                registry = default_registry(ctx)
             # Build the prompt AFTER the registry so it can carry a manifest of the actually-
             # callable tools (not just the advisory profile list). This makes real-LLM runs
             # exercise the intended tool surface instead of a sparse name list. NOTE: this changes
             # the prompt versus the old sparse form — real-model runs are not comparable across it.
             system = ctx.profile.system_prompt(tool_manifest=registry.describe())
+            # Stable pre-task phase (e.g. operational-bulletin processing) before the first step.
+            if hooks.pre_task is not None:
+                hooks.pre_task(ctx, registry, log, tags)
             context_blob = _context_blob(ctx, store)
+            # Sanitize the raw context BEFORE the model sees it. Untrusted shared context reaches
+            # the model through this blob (not a tool call), so this is where a policy layer marks
+            # it as data and neutralizes any control tokens it carries.
+            if hooks.sanitize_context is not None:
+                context_blob = hooks.sanitize_context(context_blob, ctx)
             loop = AgentLoop(
                 adapter,
                 registry,

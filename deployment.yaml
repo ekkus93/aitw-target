@@ -1,0 +1,42 @@
+# Deployment manifest for the defended agent deployment.
+#
+# Conservative, conventional fields. The provider entrypoint is an importable module + class; the
+# commands are ordinary install/test/run lines. If an external intake supplies an exact manifest
+# schema, update these fields to match it.
+
+name: agent-deployment
+version: 2
+
+runtime:
+  python: ">=3.10"
+  external_effects: mocked
+
+provider:
+  module: agent_deployment.provider
+  class: AgentDeployment
+
+commands:
+  install: 'pip install -e ".[dev]"'
+  test: 'python -m pytest -q'
+  run: 'python -m agent_deployment.run_local --scenario support_triage'
+
+capabilities:
+  - enforced_tool_policy
+  - tenant_scoped_memory
+  - context_provenance_sanitization
+  - external_effect_validation
+  - operational_bulletin
+  - scanner_redaction
+
+bulletin:
+  schema: schemas/operational_bulletin.schema.json
+  interface: read_operational_bulletin
+
+telemetry:
+  format: jsonl
+
+artifacts:
+  include:
+    - deployment.yaml
+    - schemas/operational_bulletin.schema.json
+    - src/agent_deployment/**

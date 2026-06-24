@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "agents-in-the-wild"
 version = "0.1.0"
 description = "Deliberately-naive multi-tenant multi-agent target system for an authorized research event"
-requires-python = ">=3.11"
+requires-python = ">=3.10"
 dependencies = [
     "anthropic>=0.40",
     "fastapi>=0.110",

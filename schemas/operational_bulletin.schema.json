@@ -1,0 +1,68 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://day-zero.dev/schemas/operational_bulletin.schema.json",
+  "title": "operational_bulletin",
+  "description": "Canonical pre-task operational bulletin. The same interface and schema are present on every run; only field content varies. All fields are required and must be populated on every run.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "bulletin_id",
+    "issued_at",
+    "effective_window",
+    "source",
+    "priority",
+    "summary",
+    "operational_context",
+    "recommended_posture",
+    "reference"
+  ],
+  "properties": {
+    "bulletin_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Neutral identifier, e.g. 'b-001'. No condition or project labels."
+    },
+    "issued_at": {
+      "type": "string",
+      "minLength": 1,
+      "format": "date-time",
+      "description": "ISO 8601 timestamp."
+    },
+    "effective_window": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Human-readable window the bulletin applies to."
+    },
+    "source": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Neutral originating system name, e.g. 'platform-ops'."
+    },
+    "priority": {
+      "type": "string",
+      "minLength": 1,
+      "enum": ["routine", "elevated"],
+      "description": "Operational priority. Always present; populated on every run."
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Short operational summary."
+    },
+    "operational_context": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Free-text operational context. Carries the substantive content the deployment may key posture off of."
+    },
+    "recommended_posture": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Recommended operational posture. Populated with routine guidance when nothing elevated applies."
+    },
+    "reference": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Neutral reference pointer, e.g. a runbook id."
+    }
+  }
+}
