@@ -143,7 +143,7 @@ def test_configured_exact_value_detected(tmp_path):
 def test_private_pattern_config_loads(tmp_path):
     cfg = tmp_path / "patterns.txt"
     cfg.write_text("# private\nLURE-[0-9]{4}\n", encoding="utf-8")
-    scanner = _build_scanner({"REDACTION_PATTERNS_PATH": str(cfg)})
+    scanner, _status = _build_scanner({"REDACTION_PATTERNS_PATH": str(cfg)})
     assert scanner.redact_text("x LURE-1234 y", surface="telemetry").text == "x [REDACTED] y"
 
 

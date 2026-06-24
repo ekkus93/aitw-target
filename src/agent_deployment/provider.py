@@ -15,7 +15,7 @@ from typing import Mapping, Optional
 from aitw.orchestrator.run_harness import RunHooks
 from aitw.tools.registry import ToolContext
 
-from agent_deployment.bulletin import bulletin_tool, derive_posture, load_bulletin
+from agent_deployment.bulletin import bulletin_tool, derive_posture, load_bulletin, validate_bulletin
 from agent_deployment.external_effects import EffectPolicy
 from agent_deployment.policy import ToolPolicy
 from agent_deployment.registry import PolicyRegistry
@@ -25,6 +25,7 @@ from agent_deployment.telemetry import (
     PHASE_CONTEXT_SANITIZER,
     PHASE_FINAL_OUTPUT,
     PHASE_OPERATIONAL_BULLETIN,
+    PHASE_SCANNER,
     DeploymentTelemetry,
     RedactingObservationLog,
 )
@@ -37,10 +38,31 @@ ENV_REDACTION_PATTERNS = "REDACTION_PATTERNS_PATH"
 # callable returns a mapping of name -> value). Loaded dynamically so the provider stays decoupled
 # from any specific host module name. Unset -> the host-value tier is simply not used.
 ENV_HOST_LURE_REGISTRY = "HOST_LURE_REGISTRY"
+# When truthy, the host lure registry is REQUIRED: any non-active status fails closed at
+# construction (before any task runs) rather than silently falling back to pattern detection.
+ENV_HOST_LURE_REGISTRY_REQUIRED = "HOST_LURE_REGISTRY_REQUIRED"
+
+# Host lure-registry status taxonomy (neutral strings; surfaced in telemetry/preflight, never with
+# raw values).
+LURE_STATUS_SKIPPED = "skipped"          # not configured
+LURE_STATUS_ACTIVE = "active"            # configured + loaded successfully
+LURE_STATUS_UNAVAILABLE = "unavailable"  # configured but module/callable not importable
+LURE_STATUS_FAILED = "failed"            # configured + importable but raised / returned bad data
 
 # An email-shaped value is a recipient (handled by the recipient allow-list), not a redaction
 # literal — we never redact-by-value an address, only genuine lure/secret content.
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+class HostLureRegistryError(RuntimeError):
+    """Raised when a REQUIRED host lure-value registry cannot be loaded (fail closed)."""
+
+
+def _registry_required(env: Optional[Mapping[str, str]]) -> bool:
+    import os
+
+    env = os.environ if env is None else env
+    return str(env.get(ENV_HOST_LURE_REGISTRY_REQUIRED, "")).strip().lower() in ("1", "true", "yes", "on")
 
 
 def _load_private_patterns(env: Optional[Mapping[str, str]]) -> tuple:
@@ -69,14 +91,14 @@ def _load_private_patterns(env: Optional[Mapping[str, str]]) -> tuple:
     return tuple(patterns)
 
 
-def _load_host_lure_values(env: Optional[Mapping[str, str]]) -> frozenset:
-    """Best-effort: read a host-provided lure-value registry for exact-value redaction.
+def _load_host_lure_values(env: Optional[Mapping[str, str]]) -> tuple:
+    """Read a host-provided lure-value registry for exact-value redaction. Returns (values, status).
 
     The provider runs inside the host runtime, so it may consult a host registry purely for
     DEFENSIVE redaction (never for scoring). The registry is named via the ``HOST_LURE_REGISTRY``
     env var as ``module:callable`` and loaded dynamically, so the provider hardcodes no host module
-    name. Any failure is non-fatal: detection falls back to the built-in pattern + private config.
-    Email-shaped values are excluded (those are recipients, handled by the allow-list).
+    name. This function never raises (the required-mode fail-closed decision is made by the caller
+    from the returned status). Email-shaped values are excluded (those are recipients).
     """
     import importlib
     import os
@@ -84,23 +106,36 @@ def _load_host_lure_values(env: Optional[Mapping[str, str]]) -> frozenset:
     env = os.environ if env is None else env
     spec = env.get(ENV_HOST_LURE_REGISTRY)
     if not spec or ":" not in spec:
-        return frozenset()
+        return frozenset(), LURE_STATUS_SKIPPED
+    module_name, attr = spec.split(":", 1)
     try:
-        module_name, attr = spec.split(":", 1)
         loader = getattr(importlib.import_module(module_name), attr)
+    except Exception:  # noqa: BLE001 — module/callable not present in this environment
+        return frozenset(), LURE_STATUS_UNAVAILABLE
+    try:
         planted = loader()
         values = planted.values() if hasattr(planted, "values") else planted
-        return frozenset(str(v) for v in values if v and not _EMAIL_RE.match(str(v)))
-    except Exception:  # noqa: BLE001 — host registry unavailable/changed; fall back to patterns
-        return frozenset()
+        out = frozenset(str(v) for v in values if v and not _EMAIL_RE.match(str(v)))
+    except Exception:  # noqa: BLE001 — importable but raised / returned malformed data
+        return frozenset(), LURE_STATUS_FAILED
+    return out, LURE_STATUS_ACTIVE
 
 
-def _build_scanner(env: Optional[Mapping[str, str]]) -> Scanner:
-    """Construct the layered scanner: built-in patterns + private patterns + host exact values."""
-    return Scanner(
+def _build_scanner(env: Optional[Mapping[str, str]]) -> tuple:
+    """Construct the layered scanner and report the host lure-registry status. Returns (scanner,
+    status). In required mode, any non-active status raises HostLureRegistryError (fail closed)
+    BEFORE the scanner is used, so the failure surfaces at construction, not mid-run.
+    """
+    host_values, status = _load_host_lure_values(env)
+    if _registry_required(env) and status != LURE_STATUS_ACTIVE:
+        raise HostLureRegistryError(
+            f"host lure registry is required but status={status!r}"
+        )
+    scanner = Scanner(
         extra_patterns=_load_private_patterns(env),
-        extra_literals=_load_host_lure_values(env),
+        extra_literals=host_values,
     )
+    return scanner, status
 
 
 def _allowed_recipients_for(scenario_name: str) -> frozenset:
@@ -141,10 +176,15 @@ class AgentDeployment:
         self.tool_policy = ToolPolicy()
         self.effect_policy = EffectPolicy(allowed_recipients=frozenset(allowed_recipients))
         # One layered scanner shared by the registry, the context hook, the final-output hook, and
-        # the redacting telemetry log (single detection boundary).
-        self.scanner = _build_scanner(env)
+        # the redacting telemetry log (single detection boundary). _build_scanner fails closed here
+        # if the host lure registry is configured as required but unavailable/failed.
+        self.scanner, self.host_lure_status = _build_scanner(env)
+        self.host_lure_count = len(self.scanner.extra_literals)
         # Validated once and held stable for the whole run (repeated reads return the same object).
-        self.bulletin = bulletin if bulletin is not None else load_bulletin(env=env)
+        # A directly-supplied bulletin is NOT a privileged bypass: it goes through the same
+        # fail-closed validator as env/path/default sources (an invalid object raises here, before
+        # any model/tool/telemetry exposure), and is normalized to the canonical field set.
+        self.bulletin = validate_bulletin(bulletin) if bulletin is not None else load_bulletin(env=env)
         self.posture = derive_posture(self.bulletin)
         self._telemetry: Optional[DeploymentTelemetry] = None
         self._scenario: Optional[str] = scenario
@@ -226,6 +266,16 @@ class AgentDeployment:
             bulletin_id=self.bulletin["bulletin_id"],
             priority=self.posture["priority"],
             posture_profile=self.posture["posture_profile"],
+        )
+        # Record the host lure-registry status for THIS run (the truthful runtime signal). Status +
+        # count only — never the raw lure values.
+        telemetry.emit(
+            phase=PHASE_SCANNER,
+            outcome="processed",
+            tool=None,
+            reason="host_lure_registry_status",
+            host_lure_registry_status=self.host_lure_status,
+            host_lure_registry_count=self.host_lure_count,
         )
 
     def sanitize_context(self, blob: str, ctx: ToolContext) -> str:

@@ -100,8 +100,15 @@ class PolicyRegistry(ToolRegistry):
             )
             return f"DENIED: {decision.reason}"
 
+        # A name that passed the allow-list but is not actually registered (e.g. a bogus name listed
+        # in the profile's allowed_tools) must DENY cleanly, not raise — deny by policy, not by
+        # crash. This is distinct from tool_not_allowed (off-list) and tool_not_available (a known
+        # capability deliberately removed in defended mode).
         if name not in self._tools:
-            raise KeyError(f"unknown tool: {name}")
+            self.telemetry.emit(
+                phase=PHASE_TOOL_POLICY, outcome="denied", tool=name, reason="unknown_tool"
+            )
+            return "DENIED: unknown_tool"
 
         # 2. External-effect validation (recipient/egress) before the effect tool runs.
         if name in _EFFECT_TOOLS:

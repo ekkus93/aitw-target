@@ -87,6 +87,15 @@ def test_scan_flags_injected_label(tmp_path):
     assert any(f.kind == "label" for f in findings)
 
 
+def test_scan_flags_saved_test_output(tmp_path):
+    # Saved local test-run outputs (docs/test-output-*.txt) must fail the scan if they leak in.
+    d = tmp_path / "probe"
+    d.mkdir()
+    (d / "test-output-full.txt").write_text("340 passed", encoding="utf-8")
+    findings = scan_artifact(d)
+    assert any(f.kind == "forbidden_filename" for f in findings)
+
+
 def test_scan_flags_injected_secret(tmp_path):
     d = tmp_path / "probe"
     d.mkdir()

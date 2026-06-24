@@ -37,5 +37,5 @@ def test_checklist_markdown_has_commands_and_expectations(tmp_path):
     results = preflight.run_all_checks()
     md = preflight.render_checklist(results)
     assert "command:" in md and "expected:" in md and "observed:" in md
-    # Every required item appears as a checklist line.
-    assert md.count("- [x]") == len(results)
+    # Every result appears as a checklist line (pass [x], skip [~], or fail [ ]).
+    assert md.count("- [x]") + md.count("- [~]") + md.count("- [ ]") == len(results)

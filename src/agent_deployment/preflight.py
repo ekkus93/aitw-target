@@ -359,6 +359,31 @@ def check_artifact_scan_clean(tmp_path) -> CheckResult:
         return _ok("artifact scan clean", "scan_artifact(build)", "no findings", repr(exc), False)
 
 
+def check_host_lure_registry(env=None) -> CheckResult:
+    """Report the host lure-registry status (status + count only, never raw values).
+
+    PASS  — configured and loaded (`active`).
+    SKIP  — not configured (`skipped`) or optional-and-unavailable/failed (loud, non-fatal).
+    FAIL  — configured as required but could not load (`failed`/`unavailable` under required mode).
+    """
+    from agent_deployment import provider
+
+    values, status = provider._load_host_lure_values(env)
+    required = provider._registry_required(env)
+    count = len(values)
+    command = "provider host lure-registry status (HOST_LURE_REGISTRY[_REQUIRED])"
+    expected = "active when configured; skipped/unavailable nonfatal unless required"
+    detail = f"{status} (count={count}{', required' if required else ''})"
+
+    if status == provider.LURE_STATUS_ACTIVE:
+        return _ok("host lure registry", command, expected, detail, True)
+    if required:
+        # Required + non-active is a hard failure (provider construction would also fail closed).
+        return _ok("host lure registry", command, expected, detail, False)
+    # Optional + non-active: loud but non-fatal.
+    return _skip("host lure registry", command, expected, detail)
+
+
 # --- driver -----------------------------------------------------------------------------------
 
 
@@ -374,6 +399,7 @@ def run_all_checks() -> list[CheckResult]:
             check_off_list_scheduler_denied(tmp / "sched"),
             check_cross_tenant_memory_denied(tmp / "mem"),
             check_bulletin_schema_valid(),
+            check_host_lure_registry(),
             check_secret_guard_clean(),
             check_artifact_scan_clean(tmp / "scan"),
             check_artifact_import_host_layout(tmp / "import"),

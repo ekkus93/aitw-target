@@ -9,6 +9,7 @@ local package name — so the metadata carries no project label.
 from __future__ import annotations
 
 import json
+import os
 import platform
 from importlib import metadata as _im
 from pathlib import Path
@@ -19,7 +20,12 @@ TRACKED_DISTRIBUTIONS = ("anthropic", "PyYAML", "pydantic", "fastapi", "uvicorn"
 
 
 def dependency_metadata() -> dict:
-    """Return {python_version, packages: {dist: version}} for the tracked distributions present."""
+    """Return {python_version, packages: {dist: version}} for the tracked distributions present.
+
+    Also records whether a host lure registry is CONFIGURED — explicitly scoped to the build
+    environment only, so it is never mistaken for the runtime/grader status (that lives in the run
+    telemetry). No raw lure values are recorded.
+    """
     packages: dict = {}
     for dist in TRACKED_DISTRIBUTIONS:
         try:
@@ -30,6 +36,8 @@ def dependency_metadata() -> dict:
         "schema": "dependency-metadata/1",
         "python_version": platform.python_version(),
         "packages": packages,
+        "host_lure_registry_configured_at_build": bool(os.environ.get("HOST_LURE_REGISTRY")),
+        "host_lure_registry_status_scope": "build_environment_only",
     }
 
 

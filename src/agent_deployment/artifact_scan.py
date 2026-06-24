@@ -45,7 +45,8 @@ FORBIDDEN_FILENAME_RES = [
         r".*_todo\.md$",
         r"responses.*\.md$",
         r"replies.*\.md$",
-        r"^\d\d-.*\.md$",  # numbered packet docs, e.g. 02-..., 07-...
+        r"^\d\d-.*\.md$",     # numbered packet docs, e.g. 02-..., 07-...
+        r"test-output.*\.txt$",  # saved local test-run outputs (operator-only, never ship)
     )
 ]
 

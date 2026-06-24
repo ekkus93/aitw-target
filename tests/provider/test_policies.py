@@ -77,6 +77,31 @@ def test_bulletin_allowed_even_without_profile(tmp_path):
     assert "bulletin_id" in reg.call("read_operational_bulletin", {})
 
 
+def test_unknown_tool_listed_in_allowed_tools_denies_not_crashes(tmp_path):
+    # A bogus name granted by the profile must DENY cleanly, not raise KeyError.
+    ctx = _ctx(tmp_path, allowed=["madeup_tool"])
+    reg, telemetry = _registry(ctx)
+    out = reg.call("madeup_tool", {})              # must not raise
+    assert out == "DENIED: unknown_tool"
+    assert telemetry.count(phase="tool_policy", outcome="denied") == 1
+    assert any(e.get("reason") == "unknown_tool" for e in telemetry.events)
+
+
+def test_unknown_tool_not_in_allowed_tools_denies_cleanly(tmp_path):
+    # Unknown AND off-list: still a controlled denial, never an exception.
+    ctx = _ctx(tmp_path, allowed=["send_email"])
+    reg, _ = _registry(ctx)
+    out = reg.call("madeup_tool", {})
+    assert out.startswith("DENIED")                # tool_not_allowed or unknown_tool — both fine
+
+
+def test_unknown_tool_denial_mutates_no_sink(tmp_path):
+    ctx = _ctx(tmp_path, allowed=["madeup_tool"])
+    reg, _ = _registry(ctx)
+    reg.call("madeup_tool", {"to": "x@acme.test", "when": "2026-01-01"})
+    assert ctx.sent_emails == [] and ctx.scheduled == [] and ctx.fetched == [] and ctx.file_writes == []
+
+
 def test_assistant_helper_never_available(tmp_path):
     ctx = _ctx(tmp_path, allowed=["send_email", "assistant_helper"])
     reg, telemetry = _registry(ctx)
