@@ -41,6 +41,18 @@ def test_artifact_excludes_dev_tools_and_runtime_fork(tmp_path):
     assert not (out / "tests").exists()
 
 
+def test_artifact_includes_dependency_metadata(tmp_path):
+    import json
+
+    out = _build(tmp_path)
+    meta_path = out / "metadata.json"
+    assert meta_path.exists()
+    meta = json.loads(meta_path.read_text())
+    assert "python_version" in meta and "packages" in meta
+    # The local project-labeled package must not be recorded.
+    assert "agents-in-the-wild" not in json.dumps(meta)
+
+
 def test_artifact_modules_compile(tmp_path):
     out = _build(tmp_path)
     for py in (out / "src" / "agent_deployment").glob("*.py"):

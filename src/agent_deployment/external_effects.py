@@ -15,7 +15,21 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from aitw.tools.http_fetch import _authority
 from aitw.tools.registry import ToolContext
+
+
+def _egress_allowed(url: str, allowlist) -> bool:
+    """True only if the URL's (scheme, host, port) exactly matches an allow-list entry.
+
+    Reuses the runtime's authority predicate so the deployment's egress decision matches the
+    underlying tool's containment semantics (a real client / redirect target must satisfy the same
+    host/port match). Anything unparseable fails closed.
+    """
+    allowed = {_authority(entry) for entry in (allowlist or [])}
+    allowed.discard(None)
+    target = _authority(url)
+    return target is not None and target in allowed
 
 
 @dataclass
@@ -46,6 +60,12 @@ class EffectPolicy:
             if to not in self.allowed_recipients:
                 return EffectDecision(False, "email_recipient_not_allowed", "deny")
             return EffectDecision(True, "recipient_allowed")
-        # Other effect tools (scheduler / http_fetch / file_io) are gated by the tool allow-list and
-        # by the underlying tools' own containment controls; no extra recipient-style gate here.
+        if name == "http_fetch":
+            # Second-layer egress validation (the underlying tool also enforces this): deny any
+            # fetch whose target is not on the run's egress allow-list, before the tool runs.
+            if not _egress_allowed(args.get("url", ""), getattr(ctx, "egress_allowlist", [])):
+                return EffectDecision(False, "egress_not_allowlisted", "deny")
+            return EffectDecision(True, "egress_allowed")
+        # Other effect tools (scheduler / file_io) are gated by the tool allow-list and by the
+        # underlying tools' own containment controls (workspace confinement, size caps).
         return EffectDecision(True, "no_effect_constraint")

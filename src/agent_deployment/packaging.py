@@ -19,6 +19,7 @@ import sys
 from pathlib import Path
 
 from agent_deployment.artifact_scan import scan_artifact
+from agent_deployment.metadata import write_metadata
 from agent_deployment.readme import render_artifact_readme
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -79,6 +80,7 @@ def build_artifact(out_dir: str | Path, *, repo_root: str | Path | None = None) 
 
     (out / "README.md").write_text(render_artifact_readme(), encoding="utf-8")
     (out / "pyproject.toml").write_text(_PYPROJECT, encoding="utf-8")
+    write_metadata(out / "metadata.json")
     return out
 
 
