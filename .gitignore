@@ -37,3 +37,7 @@ htmlcov/
 
 tmp/
 *~
+
+# ─── Operator-only docs (never ship in the artifact) ──────────────────────────
+# Event/operator-facing docs are kept out of the repo and the final artifact.
+docs/

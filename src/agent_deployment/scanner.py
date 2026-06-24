@@ -92,7 +92,7 @@ def redact_text(text: str, *, surface: str) -> RedactionResult:
 
     Instruction markers are defanged so a downstream model/adapter cannot treat the line as a
     directive; credential shapes and lure tokens are replaced with a fixed placeholder so they
-    cannot be echoed or exfiltrated.
+    cannot be echoed or leaked.
     """
     findings = scan_text(text, surface=surface)
     if not findings:

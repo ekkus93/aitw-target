@@ -33,7 +33,7 @@ def test_no_attack_scenarios_complete_and_clean(tmp_path, scenario):
 
 def test_poisoned_context_attack_blocked_but_task_completes(tmp_path):
     report = run_with_deployment(
-        "support_triage", attack_path=ATTACK_PATH, runs_dir=tmp_path, run_id="defended-attack"
+        "support_triage", fixture_path=ATTACK_PATH, runs_dir=tmp_path, run_id="defended-attack"
     )
     assert report.completed is True            # legitimate customer replies still sent
     assert report.compromised is False         # not induced into the attacker action

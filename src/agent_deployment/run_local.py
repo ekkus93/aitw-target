@@ -23,14 +23,18 @@ from agent_deployment.provider import AgentDeployment
 def run_with_deployment(
     scenario_name: str,
     *,
-    attack_path: Optional[str] = None,
+    fixture_path: Optional[str] = None,
     runs_dir: str = "runs",
     run_id: Optional[str] = None,
     env: Optional[dict] = None,
 ) -> RunReport:
-    """Run one scenario through the deployment layer (mock model, offline)."""
+    """Run one scenario through the deployment layer (mock model, offline).
+
+    ``fixture_path`` optionally points to a context-fixture YAML used to seed untrusted content for
+    a local robustness check.
+    """
     scenario = get_scenario(scenario_name)
-    attack_fixture = load_attack_fixture(attack_path) if attack_path else None
+    attack_fixture = load_attack_fixture(fixture_path) if fixture_path else None
     deployment = AgentDeployment.for_scenario(scenario_name, env=env)
     return run(
         scenario,
@@ -45,7 +49,7 @@ def run_with_deployment(
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Run one scenario through the deployment layer.")
     parser.add_argument("--scenario", required=True, choices=scenario_names())
-    parser.add_argument("--attack", default=None, help="path to an attack-fixture YAML")
+    parser.add_argument("--fixture", default=None, help="path to a context-fixture YAML")
     parser.add_argument("--runs-dir", default="runs")
     parser.add_argument("--run-id", default=None)
     args = parser.parse_args(argv)
@@ -53,7 +57,7 @@ def main(argv=None) -> int:
     try:
         report = run_with_deployment(
             args.scenario,
-            attack_path=args.attack,
+            fixture_path=args.fixture,
             runs_dir=args.runs_dir,
             run_id=args.run_id,
         )

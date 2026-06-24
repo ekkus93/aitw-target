@@ -19,6 +19,7 @@ commands:
   install: 'pip install -e ".[dev]"'
   test: 'python -m pytest -q'
   run: 'python -m agent_deployment.run_local --scenario support_triage'
+  reset: 'python -m agent_deployment.reset'
 
 capabilities:
   - enforced_tool_policy
