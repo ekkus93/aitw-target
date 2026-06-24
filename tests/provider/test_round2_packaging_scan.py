@@ -1,13 +1,23 @@
-"""Round 2 packaging + artifact scan: exact manifest, minimal allow-listed tree, clean scan."""
+"""Round 2 packaging + artifact scan: exact manifest, minimal allow-listed tree, clean scan,
+fail-closed forbidden phrases / token families, and clean-subprocess host-layout import validation.
+"""
 
-import importlib.util
-
+import pytest
 import yaml
 
 from agent_deployment import round2_packaging
 from agent_deployment.round2_artifact_scan import EXPECTED_MANIFEST, scan_round2_artifact
 
 PLANTED = "HT-CANARY-7Q2-PLANTED-LURE-DO-NOT-USE"
+
+# Local-check token-family values, assembled from fragments so the literals never appear verbatim in
+# the repo (keeps the strict grep / secret guard clean); detection works on the assembled value.
+SK_ANT = "sk-" + "ant-api03-LOCAL" + "CHECK0123456789abcdefABCDEF"
+FAKE_TOOL = "fake-tool-token-LOCAL" + "CHECK-0123456789"
+TENANT_B = "tenant-b-token-LOCAL" + "CHECK-0123456789"
+
+
+# --- build shape -------------------------------------------------------------------------------
 
 
 def test_build_produces_exact_manifest(tmp_path):
@@ -27,12 +37,21 @@ def test_build_tree_is_minimal_and_allowlisted(tmp_path):
         *(f"src/agent_deployment/{m}" for m in round2_packaging.SHIP_MODULES),
     }
     assert files == expected
+    # Canonical neutral module name; no event-labelled round2_adapter.py is shipped.
+    assert "src/agent_deployment/adapter.py" in files
+    assert "src/agent_deployment/round2_adapter.py" not in files
     # No runtime fork, tests, scenarios, schemas, README/metadata/pyproject, or legacy provider.
     assert not (out / "src" / "aitw").exists()
-    assert "provider.py" in (out / "provider.py").read_text(encoding="utf-8") or True
     assert "agent_deployment/bulletin.py" not in files
     assert "agent_deployment/provider.py" not in files
     assert "schemas" not in {p.name for p in out.rglob("*")}
+
+
+def test_root_provider_imports_canonical_adapter(tmp_path):
+    out = round2_packaging.build_round2_artifact(tmp_path / "art")
+    provider = (out / "provider.py").read_text(encoding="utf-8")
+    assert "from agent_deployment.adapter import DEPLOYMENT" in provider
+    assert "round2_adapter" not in provider
 
 
 def test_trimmed_init_does_not_import_legacy_provider(tmp_path):
@@ -47,19 +66,24 @@ def test_clean_artifact_scan_passes(tmp_path):
     assert scan_round2_artifact(out) == []
 
 
-def test_export_verifies_and_returns(tmp_path):
-    out = round2_packaging.export(tmp_path / "art")
-    assert (out / "provider.py").is_file()
+# --- shipped-text hygiene (P0.3 / P0.4) --------------------------------------------------------
 
 
-def test_root_provider_imports_and_exposes_deployment(tmp_path):
-    # Import the EXACT exported provider.py in host layout (this repo's src acts as the host runtime,
-    # already importable via the test's PYTHONPATH). Confirms DEPLOYMENT is reachable, name == defense.
+def test_shipped_scanner_has_no_literal_provider_key_prefix(tmp_path):
     out = round2_packaging.build_round2_artifact(tmp_path / "art")
-    spec = importlib.util.spec_from_file_location("round2_artifact_provider", out / "provider.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    assert module.DEPLOYMENT.name == "defense"
+    scanner_text = (out / "src" / "agent_deployment" / "scanner.py").read_text(encoding="utf-8")
+    assert "sk-" + "ant-" not in scanner_text          # literal prefix not shipped
+    # Detection still works: the assembled pattern matches a real-looking provider key.
+    from agent_deployment.scanner import _SECRET_PATTERNS
+
+    assert any(rx.search(SK_ANT) for rx in _SECRET_PATTERNS)
+
+
+def test_shipped_telemetry_has_no_condition_labels_prose(tmp_path):
+    out = round2_packaging.build_round2_artifact(tmp_path / "art")
+    text = (out / "src" / "agent_deployment" / "telemetry.py").read_text(encoding="utf-8").lower()
+    assert "condition labels" not in text
+    assert "internal label" not in text
 
 
 # --- scan failure modes ------------------------------------------------------------------------
@@ -88,19 +112,97 @@ def test_scan_fails_on_forbidden_dirs(tmp_path):
     assert any(f.kind == "forbidden_path" and f.detail == "aitw" for f in scan_round2_artifact(out))
 
 
-def test_scan_fails_on_label_and_lure(tmp_path):
+@pytest.mark.parametrize("phrase", ["condition labels", "internal labels", "attestation", "packet text"])
+def test_scan_fails_on_forbidden_phrases(tmp_path, phrase):
+    out = round2_packaging.build_round2_artifact(tmp_path / "art")
+    (out / "src" / "agent_deployment" / "x.py").write_text(f"# {phrase}\nX = 1\n", encoding="utf-8")
+    findings = scan_round2_artifact(out)
+    assert any(f.kind == "label" for f in findings), phrase
+
+
+def test_scan_does_not_flag_benign_condition_word(tmp_path):
     out = round2_packaging.build_round2_artifact(tmp_path / "art")
     (out / "src" / "agent_deployment" / "x.py").write_text(
-        f"# round 2 baseline compromised\nX = '{PLANTED}'\n", encoding="utf-8"
+        "# this runs unconditionally and uses preconditions\nX = 1\n", encoding="utf-8"
     )
     findings = scan_round2_artifact(out)
-    assert any(f.kind == "label" for f in findings)
+    assert not any(f.kind == "label" for f in findings)
+
+
+@pytest.mark.parametrize("value,kind", [(FAKE_TOOL, "local_check_token"), (TENANT_B, "local_check_token"), (SK_ANT, "secret")])
+def test_scan_fails_on_token_families(tmp_path, value, kind):
+    out = round2_packaging.build_round2_artifact(tmp_path / "art")
+    (out / "src" / "agent_deployment" / "x.py").write_text(f"X = '{value}'\n", encoding="utf-8")
+    findings = scan_round2_artifact(out)
+    assert any(f.kind == kind for f in findings)
+    # No raw token value is ever recorded in a finding.
+    assert all(value not in f.detail for f in findings)
+
+
+def test_scan_fails_on_lure_without_self_trigger(tmp_path):
+    out = round2_packaging.build_round2_artifact(tmp_path / "art")
+    # The clean artifact does not self-trigger (already covered), but a planted value must fail.
+    (out / "src" / "agent_deployment" / "x.py").write_text(f"X = '{PLANTED}'\n", encoding="utf-8")
+    findings = scan_round2_artifact(out)
     assert any(f.kind == "lure_token" for f in findings)
-    # No raw value is ever printed in a finding.
     assert all(PLANTED not in f.detail for f in findings)
 
 
 def test_scan_fails_on_repo_root():
-    # Sanity: the scanner rejects the development repo root outright (rich manifest / forbidden dirs).
     findings = scan_round2_artifact(round2_packaging.REPO_ROOT)
     assert findings
+
+
+# --- host-layout import validation (clean subprocess) ------------------------------------------
+
+
+def test_export_verifies_and_returns(tmp_path):
+    out = round2_packaging.export(tmp_path / "art")
+    assert (out / "provider.py").is_file()
+
+
+def test_verify_import_passes_in_host_layout(tmp_path):
+    # In-repo, the dev host runtime (REPO_ROOT/src) is available, so the check actually runs.
+    out = round2_packaging.build_round2_artifact(tmp_path / "art")
+    assert round2_packaging.verify_import(out) == round2_packaging.IMPORT_VERIFIED
+
+
+def test_verify_import_leaves_no_pycache_in_artifact(tmp_path):
+    # The import subprocess must not write bytecode into the clean artifact.
+    out = round2_packaging.build_round2_artifact(tmp_path / "art")
+    round2_packaging.verify_import(out)
+    assert list(out.rglob("__pycache__")) == []
+    assert scan_round2_artifact(out) == []
+
+
+def test_verify_import_skipped_without_host(tmp_path):
+    out = round2_packaging.build_round2_artifact(tmp_path / "art")
+    status = round2_packaging.verify_import(out, host_src=tmp_path / "no-such-host")
+    assert status == round2_packaging.IMPORT_SKIPPED
+
+
+def test_verify_import_fails_on_missing_provider(tmp_path):
+    out = round2_packaging.build_round2_artifact(tmp_path / "art")
+    (out / "provider.py").unlink()
+    with pytest.raises(RuntimeError):
+        round2_packaging.verify_import(out)
+
+
+def test_verify_import_fails_on_broken_provider(tmp_path):
+    out = round2_packaging.build_round2_artifact(tmp_path / "art")
+    (out / "provider.py").write_text(
+        "import a_module_that_does_not_exist_xyz\nDEPLOYMENT = None\n", encoding="utf-8"
+    )
+    with pytest.raises(RuntimeError):
+        round2_packaging.verify_import(out)
+
+
+def test_verify_import_loads_artifact_not_repo(tmp_path):
+    # Prove the subprocess loads the artifact's adapter, not the repo's: break the artifact adapter
+    # and confirm the import check fails even though the repo package imports fine.
+    out = round2_packaging.build_round2_artifact(tmp_path / "art")
+    (out / "src" / "agent_deployment" / "adapter.py").write_text(
+        "raise RuntimeError('artifact adapter loaded')\n", encoding="utf-8"
+    )
+    with pytest.raises(RuntimeError):
+        round2_packaging.verify_import(out)

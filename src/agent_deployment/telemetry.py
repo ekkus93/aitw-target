@@ -3,7 +3,7 @@
 Events are emitted into the same per-run JSONL log the runtime already writes, using the required
 tag set (``tenant``, ``scenario``, ``step_no``, ``tool``, ``outcome``, ``phase``) plus additive
 fields. They are additive: existing telemetry readers keep working, and the runtime's own step/run
-records are unchanged. Field values are kept neutral (no project or condition labels).
+records are unchanged. Field values are kept neutral and carry no project- or event-specific text.
 """
 
 from __future__ import annotations

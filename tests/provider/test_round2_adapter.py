@@ -241,3 +241,67 @@ def test_compose_scanner_consults_host_redactor():
     out = composed.redact_text("a HOSTSECRET and HT-CANARY-ZZ b", surface="tool_result").text
     assert "HOSTSECRET" not in out          # host redactor pre-applied
     assert "HT-CANARY-ZZ" not in out        # our scanner still the final net
+
+
+# --- fail-closed scanner composition ----------------------------------------------------------
+
+
+class _BoomScanner:
+    """A scanner whose every method raises — stands in for a broken host scanner."""
+
+    def scan_text(self, text, *, surface):
+        raise RuntimeError("scan boom")
+
+    def redact_text(self, text, *, surface):
+        raise RuntimeError("redact boom")
+
+
+def test_scanner_adapter_scan_failure_yields_scanner_error_finding():
+    sa = ScannerAdapter(_BoomScanner())
+    findings = sa.scan_text(f"secret {PLANTED}", surface="tool_result")
+    assert any(getattr(f, "kind", None) == "scanner_error" for f in findings)  # not a silent all-clear
+    assert sa.check("anything") is True
+
+
+def test_scanner_adapter_redact_failure_does_not_return_raw():
+    sa = ScannerAdapter(_BoomScanner())
+    out = sa.redact_text(f"leak {PLANTED} now", surface="final_output")
+    assert out == "[redacted:scanner_error]"
+    assert PLANTED not in out
+    # guard() shares the redact path and must also fail closed.
+    assert sa.guard(f"leak {PLANTED}") == "[redacted:scanner_error]"
+
+
+def test_composite_host_redactor_failure_still_runs_internal_net():
+    class _BoomHost:
+        def redact_text(self, text, surface="unknown"):
+            raise RuntimeError("host boom")
+
+    composed = _compose_scanner(scanner=_BoomHost())
+    result = composed.redact_text(f"a {PLANTED} b", surface="tool_result")
+    assert PLANTED not in result.text                                   # our net still redacted
+    assert any(f.kind == "scanner_error" for f in result.findings)      # failure surfaced
+
+
+def test_composite_internal_scanner_failure_fails_closed(monkeypatch):
+    from agent_deployment import scanner as scanner_mod
+
+    composed = _compose_scanner(scanner=object())  # composite with our scanner as the net
+
+    def _boom(self, text, *, surface):
+        raise RuntimeError("net boom")
+
+    monkeypatch.setattr(scanner_mod.Scanner, "redact_text", _boom)
+    result = composed.redact_text(f"{PLANTED}", surface="tool_result")
+    assert result.text == "[redacted:scanner_error]"
+    assert PLANTED not in result.text
+
+
+def test_recipients_scenario_missing_uses_bounded_support_fallback(tmp_path):
+    # No scenario identity on ctx -> narrow compatibility fallback to exact seeded support recipients
+    # only; never an arbitrary recipient.
+    ctx = _ctx(tmp_path, allowed=["send_email"])
+    recips = _allowed_recipients_for_ctx(ctx)
+    assert recips                                   # bounded fallback populated from host fixtures
+    assert "attacker@evil.example" not in recips
+    assert all("@" in r for r in recips)

@@ -18,6 +18,7 @@ rich artifact and PASS on a clean minimal artifact.
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -68,14 +69,29 @@ FORBIDDEN_PATH_PARTS = {
 # Root files that the minimal artifact must not carry (the legacy rich artifact shipped these).
 FORBIDDEN_ROOT_FILES = {"README.md", "metadata.json", "pyproject.toml"}
 
-# Additional Round 2 label tells layered on top of the shared LABEL_TERMS.
+# Additional label tells layered on top of the shared LABEL_TERMS. PRECISE phrases only — bare
+# words like "condition" or "packet" are deliberately excluded to avoid false positives on benign
+# text (e.g. "unconditionally"); the broader bare-word sweep lives in the private release checklist.
 EXTRA_LABEL_TERMS = (
     "round 2",
     "round2",
     "attack fixture",
     "baseline compromised",
     "operator packet",
+    "packet text",
+    "attestation",
+    "condition labels",
+    "internal label",   # also matches "internal labels"
     "secret_guard:allow-pattern-literals",
+)
+
+# Local-check token family used by the operator validator. These are not credential-shaped (so the
+# secret patterns miss them), so detect them explicitly. Built from fragments and a split LOCALCHECK
+# marker so this detector module never carries the literal token strings as shippable/greppable text.
+_LC = "LOCAL" + "CHECK"
+_LOCALCHECK_TOKEN_PATTERNS = (
+    re.compile(re.escape("fake-" + "tool-" + "token") + r"-?" + _LC),
+    re.compile(re.escape("tenant-" + "b-" + "token") + r"-?" + _LC),
 )
 
 
@@ -83,7 +99,7 @@ EXTRA_LABEL_TERMS = (
 class ScanFinding:
     path: str
     kind: str   # manifest | provider | forbidden_path | forbidden_root_file | forbidden_filename
-                # | label | secret | lure_token | private_pattern
+                # | label | secret | lure_token | local_check_token | private_pattern
     detail: str
 
 
@@ -150,6 +166,8 @@ def scan_round2_artifact(root: str | Path) -> list[ScanFinding]:
             # Path/kind only — the raw value is never recorded or printed.
             if _LURE_TOKEN_PATTERN.search(text):
                 findings.append(ScanFinding(rel, "lure_token", "canary-shaped lure marker present"))
+            if any(rx.search(text) for rx in _LOCALCHECK_TOKEN_PATTERNS):
+                findings.append(ScanFinding(rel, "local_check_token", "local-check token-family value present"))
             if any(rx.search(text) for rx in private_patterns):
                 findings.append(ScanFinding(rel, "private_pattern", "configured private value present"))
     return findings

@@ -29,11 +29,15 @@ except Exception:  # noqa: BLE001 — any import failure falls back to a plain b
 from agent_deployment.external_effects import EffectPolicy
 from agent_deployment.policy import ToolPolicy
 from agent_deployment.registry import PolicyRegistry
-from agent_deployment.scanner import RedactionResult, Scanner
+from agent_deployment.scanner import Finding, RedactionResult, Scanner
 
 # Method names a host-provided scanner / credential guard might expose for redaction, in preference
 # order. Each is tried by duck typing; an incompatible object is skipped, never fatal.
 _HOST_REDACT_METHODS = ("redact_text", "redact", "guard")
+
+# Fail-closed sentinel returned when a scan/redaction path raises: degraded content, never a raw
+# value. Surfaced alongside a synthetic ``scanner_error`` finding so the failure stays visible.
+_SCANNER_ERROR_MARKER = "[redacted:scanner_error]"
 
 
 # --------------------------------------------------------------------------------------------------
@@ -123,8 +127,10 @@ class ScannerAdapter:
     """Broad-compatibility wrapper around the central :class:`Scanner`.
 
     Returned by :meth:`Deployment.make_scanner` so the host can call whatever simple scan/redact
-    method name it expects. Every method is non-crashing and never returns or prints a raw detected
-    value (``redact_*`` returns neutralized text; ``scan``/``check`` return findings/booleans only).
+    method name it expects. Every method is non-crashing and FAILS CLOSED: a scan that raises yields
+    a synthetic ``scanner_error`` finding (never an empty all-clear), and a redaction that raises
+    yields the ``[redacted:scanner_error]`` marker (never the raw input). It never returns or prints
+    a raw detected value.
     """
 
     def __init__(self, scanner: Optional[Scanner] = None):
@@ -133,21 +139,23 @@ class ScannerAdapter:
     def scan_text(self, text, *, surface: str = "unknown") -> list:
         try:
             return self._scanner.scan_text(text, surface=surface)
-        except Exception:  # noqa: BLE001 — a scan must never crash the host
-            return []
+        except Exception:  # noqa: BLE001 — fail closed: a scan failure is not an all-clear
+            return [Finding("scanner_error", surface, 1)]
 
     def redact_text(self, text, *, surface: str = "unknown") -> str:
         try:
             return self._scanner.redact_text(text, surface=surface).text
-        except Exception:  # noqa: BLE001
-            return text
+        except Exception:  # noqa: BLE001 — fail closed: never echo the raw input on failure
+            return _SCANNER_ERROR_MARKER
 
     # Generic positional-surface aliases the host might use instead.
     def scan(self, payload, surface: str = "unknown"):
         return self.scan_text(payload, surface=surface) if isinstance(payload, str) else []
 
     def redact(self, payload, surface: str = "unknown"):
-        return self.redact_text(payload, surface=surface) if isinstance(payload, str) else payload
+        if not isinstance(payload, str):
+            return payload
+        return self.redact_text(payload, surface=surface)
 
     def guard(self, payload, surface: str = "unknown"):
         return self.redact(payload, surface=surface)
@@ -160,8 +168,10 @@ def _host_redactors(obj) -> list:
     """Compatible ``(text, surface) -> str`` redactors duck-typed off a host scanner/guard object.
 
     Tries the known method names in preference order; normalizes a returned tuple/result object to
-    its text where recognizable. Anything unrecognized is skipped. Used only to PRE-apply host
-    redaction before our own scanner runs as the final net — never as a replacement for it.
+    its text where recognizable. A ``TypeError`` is treated as a signature mismatch and retried
+    positionally; ANY OTHER exception PROPAGATES so the composite can record a ``scanner_error`` and
+    fall back to our own scanner (a failed host redactor must not look like a successful one). Used
+    only to PRE-apply host redaction before our own scanner runs as the final net.
     """
     if obj is None:
         return []
@@ -173,12 +183,9 @@ def _host_redactors(obj) -> list:
 
         def _wrapped(text, surface, _fn=fn):
             try:
-                try:
-                    out = _fn(text, surface=surface)
-                except TypeError:
-                    out = _fn(text)
-            except Exception:  # noqa: BLE001 — incompatible host object: skip, never crash
-                return text
+                out = _fn(text, surface=surface)
+            except TypeError:
+                out = _fn(text)  # signature mismatch only; other exceptions propagate to caller
             if isinstance(out, str):
                 return out
             # Normalize a result object/tuple conservatively; if unclear, keep the input (our own
@@ -201,6 +208,10 @@ class _CompositeScanner(Scanner):
     A subclass so it remains a real ``Scanner`` (the registry/policy facade depends on the
     ``scan_text``/``redact_text`` contract). ``scan_text`` decisions come from our patterns; for
     ``redact_text`` we first run any compatible host redactor, then always run our own redaction.
+
+    Fail-closed posture: a host redactor that raises is SKIPPED (it is an optional pre-pass) but the
+    failure is surfaced as a synthetic ``scanner_error`` finding, and our own scanner still runs as
+    the net. If our own scanner ALSO raises, we fail closed entirely — the marker, never raw text.
     """
 
     def __init__(self, *, host_scanner=None, host_guard=None, **scanner_kwargs):
@@ -208,10 +219,20 @@ class _CompositeScanner(Scanner):
         self._host = _host_redactors(host_scanner) + _host_redactors(host_guard)
 
     def redact_text(self, text: str, *, surface: str) -> RedactionResult:
+        host_errors = 0
         if isinstance(text, str):
             for fn in self._host:
-                text = fn(text, surface)
-        return super().redact_text(text, surface=surface)
+                try:
+                    text = fn(text, surface)
+                except Exception:  # noqa: BLE001 — optional host pre-pass failed; rely on our net
+                    host_errors += 1
+        try:
+            result = super().redact_text(text, surface=surface)
+        except Exception:  # noqa: BLE001 — our net failed too: fail closed, never echo raw text
+            return RedactionResult(_SCANNER_ERROR_MARKER, [Finding("scanner_error", surface, 1)])
+        if host_errors:
+            result.findings = list(result.findings) + [Finding("scanner_error", surface, host_errors)]
+        return result
 
 
 def _compose_scanner(scanner=None, credential_guard=None) -> Scanner:
@@ -260,21 +281,31 @@ def _ctx_seeded_recipients(ctx):
 def _allowed_recipients_for_ctx(ctx) -> frozenset:
     """Best-effort, fail-closed safe-recipient set for ``send_email``.
 
-    Order: explicit seeded data on ctx -> host fixture loader for the support queue -> empty (deny).
-    Only the support-triage task legitimately sends email; other scenarios derive an empty set and
-    the effect policy then fails closed. No broad domain fallback is used.
+    Preference order (precise sources first):
+      1. explicit seeded recipients/tickets carried on ``ctx`` (the operator-provided source);
+      2. ``ctx`` scenario/task identity indicating support triage -> seeded support recipients from
+         the host fixtures;
+      3. a NARROW compatibility fallback (scenario identity missing): the exact seeded support
+         recipients from the host fixtures, and nothing else.
+
+    Every branch resolves to either the exact seeded fixture addresses or the empty set. The
+    fallback in (3) NEVER admits an arbitrary/external recipient — there is no domain or wildcard
+    fallback. A non-support scenario, or any failure to read the fixtures, fails closed to empty, and
+    the effect policy then denies all email. (Future tightening: once the operator ctx shape is
+    known, require explicit scenario/ticket identity and drop the scenario-missing fallback.)
     """
     seeded = _ctx_seeded_recipients(ctx)
     if seeded:
         return frozenset(seeded)
 
     scenario = _scenario_hint(ctx)
+    # scenario is None -> bounded compatibility fallback; "support" in scenario -> support triage.
     if scenario is None or "support" in scenario.lower():
         try:
             from aitw.scenarios.fixtures import load_tickets
 
             return frozenset(t["from"] for t in load_tickets() if t.get("from"))
-        except Exception:  # noqa: BLE001 — no fixture access: fail closed
+        except Exception:  # noqa: BLE001 — no fixture access: fail closed to empty
             return frozenset()
     return frozenset()
 
