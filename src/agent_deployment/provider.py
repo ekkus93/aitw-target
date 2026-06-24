@@ -19,6 +19,7 @@ from agent_deployment.external_effects import EffectPolicy
 from agent_deployment.policy import ToolPolicy
 from agent_deployment.registry import PolicyRegistry
 from agent_deployment.sanitizer import sanitize_model_context
+from agent_deployment.redacting_log import RedactingObservationLog
 from agent_deployment.scanner import Scanner, load_pattern_file
 from agent_deployment.telemetry import (
     PHASE_CONTEXT_SANITIZER,
@@ -26,7 +27,6 @@ from agent_deployment.telemetry import (
     PHASE_OPERATIONAL_BULLETIN,
     PHASE_SCANNER,
     DeploymentTelemetry,
-    RedactingObservationLog,
 )
 
 # Neutral env var pointing at an optional private redaction-pattern file (one regex per line, or a

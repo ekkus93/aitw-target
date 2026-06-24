@@ -14,17 +14,43 @@ base runtime lacks.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from urllib.parse import urlsplit
 
-from aitw.tools.http_fetch import _authority
 from aitw.tools.registry import ToolContext
+
+# Default ports per scheme — mirrors the stock ``aitw.tools.http_fetch`` authority predicate so the
+# deployment's egress decision matches the underlying tool's containment semantics.
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+
+
+def _authority(url: str):
+    """Return ``(scheme, host, port)`` for an http(s) URL, or ``None`` if it can't be resolved.
+
+    A LOCAL copy of the stock ``aitw.tools.http_fetch._authority`` predicate (same scheme/host/port
+    normalization and default-port handling), so the shipped artifact does not import a private
+    stock-runtime symbol. Non-http(s) or unparseable input returns ``None`` and therefore can never
+    match an allow-list entry (which resolves through the same function) — i.e. it fails closed.
+    """
+    try:
+        parts = urlsplit(url)
+        scheme = parts.scheme.lower()
+        if scheme not in _DEFAULT_PORTS:
+            return None
+        host = (parts.hostname or "").lower()
+        if not host:
+            return None
+        port = parts.port if parts.port is not None else _DEFAULT_PORTS[scheme]
+    except ValueError:  # malformed port / authority
+        return None
+    return (scheme, host, port)
 
 
 def _egress_allowed(url: str, allowlist) -> bool:
     """True only if the URL's (scheme, host, port) exactly matches an allow-list entry.
 
-    Reuses the runtime's authority predicate so the deployment's egress decision matches the
-    underlying tool's containment semantics (a real client / redirect target must satisfy the same
-    host/port match). Anything unparseable fails closed.
+    Uses the local authority predicate so the deployment's egress decision matches the underlying
+    tool's containment semantics (a real client / redirect target must satisfy the same host/port
+    match). Anything unparseable fails closed.
     """
     allowed = {_authority(entry) for entry in (allowlist or [])}
     allowed.discard(None)

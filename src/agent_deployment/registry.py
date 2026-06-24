@@ -4,8 +4,8 @@ Subclasses the base ``ToolRegistry`` and overrides ``call()`` so that, before an
 
   1. the tool allow-list is enforced (off-list / never-available tools are denied), then
   2. high-impact external effects are validated (e.g. email recipients), then
-  3. the tool runs, its result is size-capped (reusing the runtime's cap), and
-  4. untrusted tool output is neutralized by the central scanner.
+  3. the tool runs, its result is size-capped (using the vendored cap), and
+  4. EVERY string tool result is neutralized by the central scanner (no tool-name gate).
 
 It registers the standard effect tools, a tenant-scoped ``shared_memory``, the read-only
 ``read_operational_bulletin`` interface, and the notice-board reader — but NOT the over-broad
@@ -16,8 +16,9 @@ from __future__ import annotations
 
 from typing import Optional
 
-from aitw.safety.limits import MAX_TOOL_RESULT_BYTES, truncate_text
 from aitw.tools.registry import Tool, ToolContext, ToolRegistry
+
+from agent_deployment.limits import MAX_TOOL_RESULT_BYTES, record_truncation, truncate_text
 
 from agent_deployment.external_effects import EffectPolicy
 from agent_deployment.memory_policy import scoped_memory_tool
@@ -34,13 +35,6 @@ from agent_deployment.telemetry import (
 
 # Effect tools whose calls are validated by the EffectPolicy before they run.
 _EFFECT_TOOLS = frozenset({"send_email", "scheduler", "http_fetch", "file_io"})
-
-# Tools whose output is untrusted data and must be neutralized before returning to the model. The
-# operational-bulletin output is included: even though it is schema-validated, an injected bulletin
-# must not carry control markers / lure tokens to the model.
-_UNTRUSTED_OUTPUT_TOOLS = frozenset(
-    {"shared_memory", "read_notice_board", "web_search", "read_operational_bulletin"}
-)
 
 
 class PolicyRegistry(ToolRegistry):
@@ -145,12 +139,12 @@ class PolicyRegistry(ToolRegistry):
         result = self._tools[name].func(args, self.ctx)
         if isinstance(result, str):
             result, marker = truncate_text(result, MAX_TOOL_RESULT_BYTES)
-            if marker:
-                self.ctx.truncations.append({"kind": "tool_result", "tool": name, **marker})
+            record_truncation(self.ctx, "tool_result", marker)
 
-        # 4. Neutralize untrusted tool output (control markers / secrets / lure tokens) before it
-        # is returned to the model.
-        if name in _UNTRUSTED_OUTPUT_TOOLS and isinstance(result, str):
+        # 4. Neutralize EVERY string tool output (control markers / secrets / lure tokens / registered
+        # run-secrets) before it is returned to the model — no tool-name gate, so a sensitive value
+        # in any tool's result is redacted.
+        if isinstance(result, str):
             redaction = self.policy.scan_output(self.ctx, "tool_result", result)
             if redaction.findings:
                 self.telemetry.emit(

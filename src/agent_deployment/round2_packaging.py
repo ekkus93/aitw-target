@@ -47,6 +47,8 @@ SHIP_MODULES = (
     "sanitizer.py",
     "scanner.py",
     "telemetry.py",
+    "limits.py",
+    "registered_secrets.py",
 )
 
 # Exact accepted manifest. No comments, no extra keys (the intake loader rejects extra fields).
@@ -124,9 +126,16 @@ def verify_import(artifact_root: str | Path, *, host_src: str | Path | None = No
         "sys.path[:0] = [root + '/src', host]\n"  # artifact src FIRST, then host runtime
         "spec = importlib.util.spec_from_file_location('r2_provider', root + '/provider.py')\n"
         "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)\n"
-        "assert m.DEPLOYMENT.name == 'defense', 'unexpected DEPLOYMENT.name'\n"
-        "assert hasattr(m.DEPLOYMENT, 'wrap_store'), 'missing wrap_store'\n"
-        "assert hasattr(m.DEPLOYMENT, 'task_registry'), 'missing task_registry'\n"
+        "d = m.DEPLOYMENT\n"
+        "assert d.name == 'defense', 'unexpected DEPLOYMENT.name'\n"
+        "for meth in ('wrap_store', 'task_registry', 'posture_registry', 'make_scanner', 'make_broker'):\n"
+        "    assert hasattr(d, meth), 'missing ' + meth\n"
+        "sc = d.make_scanner()\n"
+        "assert hasattr(sc, 'register') and hasattr(sc.scan('x'), 'redacted'), 'scanner contract'\n"
+        "bk = d.make_broker(scanner=sc, model_key='m', tool_backing_secret='t')\n"
+        "assert bk is not None and hasattr(bk, 'issue_tool_credential') and hasattr(bk, 'is_valid'), 'broker contract'\n"
+        "cr = bk.issue_tool_credential('tenant_a')\n"
+        "assert hasattr(cr, 'ttl_seconds') and bk.is_valid(cr), 'credential contract'\n"
         "print('IMPORT_OK')\n"
     )
     # Scrub PYTHONPATH (so the dev repo is not on the path) and disable bytecode writing (so the

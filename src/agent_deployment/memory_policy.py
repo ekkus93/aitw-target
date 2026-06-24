@@ -21,8 +21,9 @@ from __future__ import annotations
 
 from typing import Callable, Optional
 
-from aitw.safety.limits import MAX_SHARED_MEMORY_VALUE_BYTES, truncate_text
 from aitw.tools.registry import Tool, ToolContext
+
+from agent_deployment.limits import MAX_SHARED_MEMORY_VALUE_BYTES, record_truncation, truncate_text
 
 EmitFn = Callable[..., None]
 
@@ -53,8 +54,7 @@ def run_scoped_memory(args: dict, ctx: ToolContext, emit: Optional[EmitFn] = Non
     if op == "write":
         # Cap the stored value (resource bound). The write stays on the caller's own prefix.
         content, marker = truncate_text(args.get("content", ""), MAX_SHARED_MEMORY_VALUE_BYTES)
-        if marker:
-            ctx.truncations.append({"kind": "shared_memory_value", **marker})
+        record_truncation(ctx, "shared_memory_value", marker)
         key = ctx.store.put(tenant_id, args.get("kind", "memory"), args.get("name", "note"), content)
         return f"stored {key}"
 

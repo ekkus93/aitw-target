@@ -38,6 +38,8 @@ SHIP_MODULES = (
     "registry.py",
     "external_effects.py",
     "telemetry.py",
+    "limits.py",
+    "redacting_log.py",
     "reset.py",
     "run_local.py",
 )

@@ -20,8 +20,9 @@ from agent_deployment.external_effects import EffectPolicy
 from agent_deployment.policy import ToolPolicy
 from agent_deployment.provider import _build_scanner, _load_private_patterns
 from agent_deployment.registry import PolicyRegistry
+from agent_deployment.redacting_log import RedactingObservationLog
 from agent_deployment.scanner import Scanner
-from agent_deployment.telemetry import DeploymentTelemetry, RedactingObservationLog
+from agent_deployment.telemetry import DeploymentTelemetry
 
 CANARY = "HT-CANARY-7Q2-PLANTED-LURE-DO-NOT-USE"
 
