@@ -104,13 +104,3 @@ class ProviderPolicy:
         return EffectArgScan(
             "redact", redacted, "effect_args_redacted", redaction_count=count, findings=tuple(findings)
         )
-
-    def redact_for_telemetry(self, value):
-        """Recursively neutralize lure/marker/credential content in a telemetry value."""
-        if isinstance(value, str):
-            return self.scanner.redact_text(value, surface="telemetry").text
-        if isinstance(value, dict):
-            return {k: self.redact_for_telemetry(v) for k, v in value.items()}
-        if isinstance(value, list):
-            return [self.redact_for_telemetry(v) for v in value]
-        return value

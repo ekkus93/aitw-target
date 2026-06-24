@@ -153,6 +153,96 @@ def test_scan_fails_on_repo_root():
     assert findings
 
 
+def test_scan_fails_on_missing_manifest(tmp_path):
+    out = round2_packaging.build_round2_artifact(tmp_path / "art")
+    (out / "deployment.yaml").unlink()
+    assert any(f.kind == "manifest" and "missing" in f.detail for f in scan_round2_artifact(out))
+
+
+def test_scan_fails_on_unparseable_manifest(tmp_path):
+    out = round2_packaging.build_round2_artifact(tmp_path / "art")
+    (out / "deployment.yaml").write_text("name: defense\n  : : :\n", encoding="utf-8")
+    assert any(f.kind == "manifest" and "unparseable" in f.detail for f in scan_round2_artifact(out))
+
+
+def test_scan_fails_on_non_dict_manifest(tmp_path):
+    out = round2_packaging.build_round2_artifact(tmp_path / "art")
+    (out / "deployment.yaml").write_text("- defense\n", encoding="utf-8")  # a list, not a mapping
+    findings = scan_round2_artifact(out)
+    assert any(f.kind == "manifest" and "does not match" in f.detail for f in findings)
+
+
+def test_scan_fails_on_root_provider_without_deployment(tmp_path):
+    out = round2_packaging.build_round2_artifact(tmp_path / "art")
+    (out / "provider.py").write_text("X = 1\n", encoding="utf-8")  # no DEPLOYMENT reference
+    assert any(f.kind == "provider" and "DEPLOYMENT" in f.detail for f in scan_round2_artifact(out))
+
+
+def test_scan_fails_on_forbidden_root_file(tmp_path):
+    out = round2_packaging.build_round2_artifact(tmp_path / "art")
+    (out / "README.md").write_text("readme\n", encoding="utf-8")
+    assert any(f.kind == "forbidden_root_file" and f.path == "README.md" for f in scan_round2_artifact(out))
+
+
+def test_scan_fails_on_forbidden_filename(tmp_path):
+    out = round2_packaging.build_round2_artifact(tmp_path / "art")
+    (out / "design_spec.md").write_text("notes\n", encoding="utf-8")
+    assert any(f.kind == "forbidden_filename" for f in scan_round2_artifact(out))
+
+
+def test_scan_fails_on_secret_shape(tmp_path):
+    out = round2_packaging.build_round2_artifact(tmp_path / "art")
+    (out / "src" / "agent_deployment" / "x.py").write_text(f"K = '{SK_ANT}'\n", encoding="utf-8")
+    findings = scan_round2_artifact(out)
+    assert any(f.kind == "secret" for f in findings)
+    assert all(SK_ANT not in f.detail for f in findings)  # raw value never printed
+
+
+def test_scan_fails_on_private_pattern(tmp_path, monkeypatch):
+    cfg = tmp_path / "patterns.txt"
+    cfg.write_text("FAKE-PRIV-[0-9]{3}\n", encoding="utf-8")
+    monkeypatch.setenv("REDACTION_PATTERNS_PATH", str(cfg))
+    out = round2_packaging.build_round2_artifact(tmp_path / "art")
+    (out / "src" / "agent_deployment" / "x.py").write_text("V = 'FAKE-PRIV-123'\n", encoding="utf-8")
+    findings = scan_round2_artifact(out)
+    assert any(f.kind == "private_pattern" for f in findings)
+    assert all("FAKE-PRIV-123" not in f.detail for f in findings)
+
+
+def test_export_raises_on_scan_findings(tmp_path, monkeypatch):
+    import pytest as _pytest
+
+    from agent_deployment.round2_artifact_scan import ScanFinding
+
+    monkeypatch.setattr(
+        round2_packaging, "scan_round2_artifact", lambda root: [ScanFinding("x.py", "label", "blue team")]
+    )
+    with _pytest.raises(RuntimeError):
+        round2_packaging.export(tmp_path / "art", import_check=False)
+
+
+def test_is_clean_true_on_clean_artifact(tmp_path):
+    from agent_deployment.round2_artifact_scan import is_clean
+
+    out = round2_packaging.build_round2_artifact(tmp_path / "art")
+    assert is_clean(out) is True
+
+
+def test_scan_skips_non_utf8_text_file(tmp_path):
+    # A text-suffixed file with non-UTF8 bytes is skipped, not a crash (defensive read path).
+    out = round2_packaging.build_round2_artifact(tmp_path / "art")
+    (out / "src" / "agent_deployment" / "bad.py").write_bytes(b"\xff\xfe\x00bad")
+    assert scan_round2_artifact(out) == []   # unreadable file ignored, clean otherwise
+
+
+def test_build_replaces_existing_output(tmp_path):
+    p = tmp_path / "art"
+    round2_packaging.build_round2_artifact(p)
+    (p / "stale.txt").write_text("stale\n", encoding="utf-8")
+    round2_packaging.build_round2_artifact(p)  # rebuild over the existing tree
+    assert not (p / "stale.txt").exists()
+
+
 # --- host-layout import validation (clean subprocess) ------------------------------------------
 
 

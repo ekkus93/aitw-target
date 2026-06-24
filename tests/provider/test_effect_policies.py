@@ -65,3 +65,12 @@ def test_effect_policy_email_unaffected_by_http_branch(tmp_path):
     policy = EffectPolicy(allowed_recipients=frozenset({"customer@acme.test"}))
     assert policy.validate_effect("send_email", {"to": "customer@acme.test"}, ctx=ctx).allowed
     assert not policy.validate_effect("send_email", {"to": "x@evil.example"}, ctx=ctx).allowed
+
+
+def test_send_email_missing_recipient_denied(tmp_path):
+    # An empty or whitespace-only recipient is denied as email_missing_recipient, before any sink.
+    ctx = _ctx(tmp_path, allowed=["send_email"], egress=ALLOWLIST)
+    policy = EffectPolicy(allowed_recipients=frozenset({"customer@acme.test"}))
+    d = policy.validate_effect("send_email", {"to": "", "body": "x"}, ctx=ctx)
+    assert d.allowed is False and d.reason == "email_missing_recipient"
+    assert policy.validate_effect("send_email", {"to": "   "}, ctx=ctx).reason == "email_missing_recipient"

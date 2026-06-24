@@ -62,17 +62,22 @@ def test_deployment_subclasses_host_base_when_present(monkeypatch):
 
     mod.V2Deployment = V2Deployment
     monkeypatch.setitem(sys.modules, "aitw.orchestrator.deployments", mod)
-    sys.modules.pop("agent_deployment.adapter", None)
     import importlib
 
-    adapter = importlib.import_module("agent_deployment.adapter")
+    # Re-import under the patched host module to confirm subclassing, then restore the ORIGINAL
+    # module object so other tests keep the same class identities (the top-level imports in this
+    # file are bound to it — a fresh re-import would break isinstance checks elsewhere).
+    original = sys.modules.get("agent_deployment.adapter")
+    sys.modules.pop("agent_deployment.adapter", None)
     try:
-        assert issubclass(adapter.Deployment, V2Deployment)
-        assert adapter.DEPLOYMENT.name == "defense"
+        reloaded = importlib.import_module("agent_deployment.adapter")
+        assert issubclass(reloaded.Deployment, V2Deployment)
+        assert reloaded.DEPLOYMENT.name == "defense"
     finally:
-        # Restore the module-cache state for other tests (fall back to object base).
-        sys.modules.pop("agent_deployment.adapter", None)
-        importlib.import_module("agent_deployment.adapter")
+        if original is not None:
+            sys.modules["agent_deployment.adapter"] = original
+        else:
+            sys.modules.pop("agent_deployment.adapter", None)
 
 
 # --- ScopedStore tenant isolation -------------------------------------------------------------
@@ -305,3 +310,100 @@ def test_recipients_scenario_missing_uses_bounded_support_fallback(tmp_path):
     assert recips                                   # bounded fallback populated from host fixtures
     assert "attacker@evil.example" not in recips
     assert all("@" in r for r in recips)
+
+
+# --- host-scanner result normalization (#1) ---------------------------------------------------
+
+
+def test_compose_scanner_normalizes_host_result_object():
+    # A host redactor that returns a result OBJECT (with a .text attr) is normalized to its text,
+    # and our scanner still runs as the net.
+    class _HostObjResult:
+        def redact_text(self, text, surface="unknown"):
+            class _R:
+                pass
+
+            r = _R()
+            r.text = text.replace("HOSTX", "[obj]")
+            return r
+
+    composed = _compose_scanner(scanner=_HostObjResult())
+    out = composed.redact_text(f"a HOSTX and {PLANTED} b", surface="tool_result").text
+    assert "HOSTX" not in out          # host result-object .text was applied
+    assert PLANTED not in out          # our net still ran
+
+
+def test_compose_scanner_normalizes_host_tuple_result():
+    # A host redactor that returns a (text, meta) tuple is normalized to the first string element.
+    class _HostTupleResult:
+        def redact_text(self, text, surface="unknown"):
+            return (text.replace("HOSTX", "[tup]"), ["meta"])
+
+    composed = _compose_scanner(scanner=_HostTupleResult())
+    out = composed.redact_text("HOSTX here", surface="tool_result").text
+    assert out.startswith("[tup]")
+    assert "HOSTX" not in out
+
+
+def test_compose_scanner_unrecognized_host_return_falls_back_to_net():
+    # An unrecognized host return (not str / .text / tuple) is NOT a failure: keep the input for the
+    # pre-pass and let our scanner be the net. No scanner_error is forced.
+    class _HostBadReturn:
+        def redact_text(self, text, surface="unknown"):
+            return 12345
+
+    composed = _compose_scanner(scanner=_HostBadReturn())
+    result = composed.redact_text(f"x {PLANTED} y", surface="tool_result")
+    assert PLANTED not in result.text
+    assert all(f.kind != "scanner_error" for f in result.findings)
+
+
+# --- compose with a real Scanner instance (#3) ------------------------------------------------
+
+
+def test_compose_scanner_carries_forward_real_scanner_config():
+    from agent_deployment.adapter import _CompositeScanner
+
+    sc = Scanner(extra_literals=frozenset({"MYSECRETLIT"}))
+    composed = _compose_scanner(scanner=sc)  # real Scanner, no guard
+    # Returns a plain Scanner carrying the configured literals (no host pre-pass -> not a composite).
+    assert isinstance(composed, Scanner)
+    assert not isinstance(composed, _CompositeScanner)
+    assert "MYSECRETLIT" in composed.extra_literals
+    assert "MYSECRETLIT" not in composed.redact_text("x MYSECRETLIT y", surface="tool_result").text
+
+
+def test_compose_scanner_real_scanner_plus_guard_is_composite():
+    from agent_deployment.adapter import _CompositeScanner
+
+    sc = Scanner(extra_literals=frozenset({"MYSECRETLIT"}))
+
+    class _Guard:
+        def guard(self, text, surface="unknown"):
+            return text.replace("GUARDX", "[g]")
+
+    composed = _compose_scanner(scanner=sc, credential_guard=_Guard())
+    assert isinstance(composed, _CompositeScanner)
+    assert "MYSECRETLIT" in composed.extra_literals     # carried-forward config preserved
+    out = composed.redact_text("MYSECRETLIT GUARDX", surface="tool_result").text
+    assert "MYSECRETLIT" not in out                     # our net redacted the carried literal
+    assert "GUARDX" not in out                          # guard pre-pass applied
+
+
+# --- recipient fail-closed when fixtures unavailable (#4) -------------------------------------
+
+
+def test_recipients_fail_closed_when_fixtures_raise(tmp_path, monkeypatch):
+    import aitw.scenarios.fixtures as fixtures
+
+    def _boom():
+        raise OSError("fixtures unavailable")
+
+    monkeypatch.setattr(fixtures, "load_tickets", _boom)
+    ctx = _ctx(tmp_path, allowed=["send_email"])
+    ctx.scenario_name = "support_triage"
+    assert _allowed_recipients_for_ctx(ctx) == frozenset()      # fail closed to empty
+    # The registry then denies even a plausible support address (deny-all when no allowlist).
+    reg = DEPLOYMENT.task_registry(ctx)
+    assert reg.call("send_email", {"to": "customer@acme.test", "body": "x"}).startswith("DENIED")
+    assert ctx.sent_emails == []

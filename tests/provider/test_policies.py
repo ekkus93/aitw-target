@@ -217,3 +217,38 @@ def test_registry_memory_denial_emits_telemetry(tmp_path):
     out = reg.call("shared_memory", {"op": "read", "key": "tenant_b:memory:x_tenant_probe"})
     assert out.startswith("DENIED")
     assert telemetry.count(phase="memory_policy", outcome="denied") == 1
+
+
+def test_memory_no_store_returns_error(tmp_path):
+    ctx = _ctx(tmp_path, allowed=["shared_memory"], store=None)
+    assert run_scoped_memory({"op": "read"}, ctx) == "ERROR: no store configured"
+
+
+def test_memory_owned_explicit_key_read_returns_content(tmp_path):
+    # The allow side of isolation: an explicit OWNED key returns its content (the deny side is
+    # covered by test_cross_tenant_read_denied).
+    ctx = _ctx(tmp_path, allowed=["shared_memory"], store=_store_with_two_tenants())
+    assert run_scoped_memory({"op": "read", "key": "tenant_a:memory:note"}, ctx) == "alpha-own-data"
+
+
+def test_memory_list_own_subprefix_filters(tmp_path):
+    store = _store_with_two_tenants()
+    store.put("tenant_a", "profile", "agent", "{}")
+    ctx = _ctx(tmp_path, allowed=["shared_memory"], store=store)
+    out = run_scoped_memory({"op": "list", "prefix": "tenant_a:memory:"}, ctx)
+    assert "tenant_a:memory:note" in out
+    assert "tenant_a:profile:agent" not in out   # narrowed to the requested own sub-prefix
+    assert "tenant_b" not in out
+
+
+def test_memory_write_truncates_oversized_value(tmp_path):
+    from aitw.safety.limits import MAX_SHARED_MEMORY_VALUE_BYTES
+
+    store = _store_with_two_tenants()
+    ctx = _ctx(tmp_path, allowed=["shared_memory"], store=store)
+    out = run_scoped_memory(
+        {"op": "write", "name": "huge", "content": "z" * (MAX_SHARED_MEMORY_VALUE_BYTES + 100)}, ctx
+    )
+    assert out.startswith("stored tenant_a:memory:huge")
+    assert any(t.get("kind") == "shared_memory_value" for t in ctx.truncations)
+    assert len(store.get_value("tenant_a", "memory", "huge")) <= MAX_SHARED_MEMORY_VALUE_BYTES
