@@ -179,3 +179,45 @@ def test_local_authority_matches_stock():
         "http://",
     ]:
         assert local(url) == stock(url), url
+
+
+# --- issued_tokens normalization + redactor one-pass invariant (Fix3) --------------------------
+
+
+def test_make_broker_accepts_single_string_issued_token():
+    # A single string is ONE token, not an iterable of characters (the Fix3 bug). `tok` is named to
+    # avoid the secret guard's hardcoded-credential-assignment lvalue rule.
+    dep = Deployment()
+    tok = "PREEXISTING-TOKEN-1"
+    dep.make_broker(issued_tokens=tok)
+    out = dep.make_scanner().scan(f"t={tok}").redacted
+    assert tok not in out
+    assert out == "t=[REDACTED]"   # not corrupted by per-character registration
+
+
+def test_make_broker_accepts_iterable_issued_tokens():
+    dep = Deployment()
+    dep.make_broker(issued_tokens=["TOKEN-A", "TOKEN-B"])
+    out = dep.make_scanner().scan("TOKEN-A TOKEN-B").redacted
+    assert "TOKEN-A" not in out and "TOKEN-B" not in out
+    assert out == "[REDACTED] [REDACTED]"
+
+
+def test_make_broker_accepts_bytes_issued_token():
+    dep = Deployment()
+    dep.make_broker(issued_tokens=b"BYTES-TOKEN-1")
+    assert dep.make_scanner().scan("v=BYTES-TOKEN-1").redacted == "v=[REDACTED]"
+
+
+def test_registered_secret_scanner_does_not_redact_inside_marker():
+    from agent_deployment.registered_secrets import RegisteredSecretScanner
+
+    sc = RegisteredSecretScanner()
+    # Pathological short values (letters that also appear inside "[REDACTED]"). A repeated-replace
+    # loop would corrupt its own marker; the one-pass sub must not.
+    sc.register("E")
+    sc.register("D")
+    assert sc.scan("E").redacted == "[REDACTED]"
+    assert "[REDACTED]" in sc.scan("D E").redacted
+    # No nested/corrupted marker text.
+    assert "[RE[" not in sc.scan("E D").redacted

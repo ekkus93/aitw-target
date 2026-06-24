@@ -11,6 +11,7 @@ credential-shape detection); the two compose.
 from __future__ import annotations
 
 import base64
+import re
 from dataclasses import dataclass, field
 
 REDACTED = "[REDACTED]"
@@ -47,13 +48,22 @@ class RegisteredSecretScanner:
 
     def scan(self, text) -> SecretScanResult:
         redacted = str(text)
+        values = [v for v in self._values if v]
+        if not values:
+            return SecretScanResult(redacted=redacted)
+
+        # One-pass substitution: build a single alternation (longest-first so a longer registered
+        # form wins at a given position) and replace in ONE sweep. This never reprocesses the
+        # inserted ``[REDACTED]`` marker — a repeated ``str.replace`` loop could match a short
+        # registered value (e.g. a stray character) inside the marker and corrupt the output.
+        pattern = re.compile("|".join(re.escape(v) for v in sorted(values, key=len, reverse=True)))
         count = 0
-        findings: list = []
-        # Longest-first so a longer registered form is redacted before a shorter substring of it.
-        for value in sorted(self._values, key=len, reverse=True):
-            if value and value in redacted:
-                occurrences = redacted.count(value)
-                redacted = redacted.replace(value, REDACTED)
-                count += occurrences
-                findings.append("registered_secret")
-        return SecretScanResult(redacted=redacted, redaction_count=count, findings=tuple(findings))
+
+        def _repl(_match):
+            nonlocal count
+            count += 1
+            return REDACTED
+
+        out = pattern.sub(_repl, redacted)
+        findings = ("registered_secret",) if count else ()
+        return SecretScanResult(redacted=out, redaction_count=count, findings=findings)

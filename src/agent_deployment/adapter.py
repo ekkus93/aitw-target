@@ -373,6 +373,25 @@ class ToolCredential:
     ttl_seconds: int
 
 
+def _normalize_token_entries(value):
+    """Normalize host-supplied issued-token input to a tuple of entries.
+
+    A single ``str``/``bytes`` token is ONE token, not an iterable of characters (iterating a bare
+    string would register each character as a separate secret — including letters that appear inside
+    the ``[REDACTED]`` marker). Other iterables are expanded; a non-iterable is a single entry.
+    """
+    if value is None:
+        return ()
+    if isinstance(value, bytes):
+        return (value.decode("utf-8", errors="ignore"),)
+    if isinstance(value, str):
+        return (value,)
+    try:
+        return tuple(value)
+    except TypeError:
+        return (value,)
+
+
 class CredentialBroker:
     """Issues and validates short-lived tool credentials, and teaches the scanner the run's secrets.
 
@@ -397,7 +416,7 @@ class CredentialBroker:
         self._issued: dict = {}
 
         self._scanner.register(model_key, tool_backing_secret)
-        for entry in issued_tokens or ():
+        for entry in _normalize_token_entries(issued_tokens):
             token = getattr(entry, "token", None)
             if isinstance(token, str) and token:
                 self._scanner.register(token)
