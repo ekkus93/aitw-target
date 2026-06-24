@@ -31,7 +31,7 @@ def test_artifact_excludes_dev_tools_and_runtime_fork(tmp_path):
     out = _build(tmp_path)
     pkg = out / "src" / "agent_deployment"
     # Build/dev tools must not ship.
-    for module in ("packaging.py", "artifact_scan.py", "evidence.py", "readme.py"):
+    for module in ("packaging.py", "artifact_scan.py", "evidence.py", "readme.py", "preflight.py", "metadata.py"):
         assert not (pkg / module).exists(), f"{module} should not ship"
     # The underlying runtime fork must not be bundled.
     assert not (out / "src" / "aitw").exists()
