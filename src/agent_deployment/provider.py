@@ -9,7 +9,6 @@ whole integration — no fork of the run loop, and all existing scoring/telemetr
 from __future__ import annotations
 
 import re
-from pathlib import Path
 from typing import Mapping, Optional
 
 from aitw.orchestrator.run_harness import RunHooks
@@ -20,7 +19,7 @@ from agent_deployment.external_effects import EffectPolicy
 from agent_deployment.policy import ToolPolicy
 from agent_deployment.registry import PolicyRegistry
 from agent_deployment.sanitizer import sanitize_model_context
-from agent_deployment.scanner import Scanner
+from agent_deployment.scanner import Scanner, load_pattern_file
 from agent_deployment.telemetry import (
     PHASE_CONTEXT_SANITIZER,
     PHASE_FINAL_OUTPUT,
@@ -70,7 +69,8 @@ def _load_private_patterns(env: Optional[Mapping[str, str]]) -> tuple:
 
     Returns a tuple of compiled patterns. If the env var is unset, returns (). If it is set but the
     file is missing, unreadable, or contains an invalid regex, raises (a configured-but-broken
-    private source must not silently degrade detection).
+    private source must not silently degrade detection). Parsing is shared with the artifact scanner
+    via ``scanner.load_pattern_file``.
     """
     import os
 
@@ -78,17 +78,7 @@ def _load_private_patterns(env: Optional[Mapping[str, str]]) -> tuple:
     path = env.get(ENV_REDACTION_PATTERNS)
     if not path:
         return ()
-    raw = Path(path).read_text(encoding="utf-8")  # raises if missing/unreadable -> fail closed
-    lines = [ln.strip() for ln in raw.splitlines()]
-    patterns = []
-    for ln in lines:
-        if not ln or ln.startswith("#"):
-            continue
-        # Tolerate a simple YAML list ("- pattern") as well as one-regex-per-line.
-        if ln.startswith("- "):
-            ln = ln[2:].strip().strip("'\"")
-        patterns.append(re.compile(ln))  # invalid regex -> raises -> fail closed
-    return tuple(patterns)
+    return load_pattern_file(path)
 
 
 def _load_host_lure_values(env: Optional[Mapping[str, str]]) -> tuple:

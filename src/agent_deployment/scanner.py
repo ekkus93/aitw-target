@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 
 # Surfaces a scan can be attributed to (plain strings for telemetry legibility).
 SURFACES = (
@@ -69,12 +70,32 @@ _SECRET_PATTERNS = [
     re.compile(r"-----BEGIN (?:RSA |EC )?PRIVATE KEY-----"),
 ]
 
-# Planted lure-token shape (the fixtures use an HT-CANARY-... value). Matching the family by prefix
-# catches a rotated lure without hardcoding the exact value.
+# Canary-shaped lure-marker family. Matching by shape catches a rotated lure without hardcoding any
+# concrete planted value (the regex definition below intentionally does not match itself).
 _LURE_TOKEN_PATTERN = re.compile(r"HT-[A-Z0-9-]*CANARY[A-Z0-9-]*")
 
 _REDACTION = "[REDACTED]"
 _MARKER_REDACTION = "[neutralized-control-marker]"
+
+
+def load_pattern_file(path: str | Path) -> tuple:
+    """Compile operator-private redaction regexes from a local file. Fail closed.
+
+    One regex per line; a simple YAML list (``- pattern``) is tolerated; ``#`` comments and blank
+    lines are ignored. A missing/unreadable file or an invalid regex raises — a configured-but-broken
+    private source must not silently degrade detection. Shared by the runtime scanner and the
+    artifact scanner so both honor the same ``REDACTION_PATTERNS_PATH`` configuration.
+    """
+    raw = Path(path).read_text(encoding="utf-8")  # raises if missing/unreadable -> fail closed
+    patterns = []
+    for ln in raw.splitlines():
+        ln = ln.strip()
+        if not ln or ln.startswith("#"):
+            continue
+        if ln.startswith("- "):
+            ln = ln[2:].strip().strip("'\"")
+        patterns.append(re.compile(ln))  # invalid regex -> raises -> fail closed
+    return tuple(patterns)
 
 
 @dataclass(frozen=True)

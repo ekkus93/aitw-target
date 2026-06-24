@@ -13,12 +13,17 @@ secret guard), which is exactly why it is a dev-only tool and is excluded from t
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from agent_deployment.scanner import _SECRET_PATTERNS
+from agent_deployment.scanner import _LURE_TOKEN_PATTERN, _SECRET_PATTERNS, load_pattern_file
+
+# Same neutral env var the runtime scanner uses for operator-private redaction patterns. When set,
+# the artifact scan also fails on a configured private value; set-but-unreadable fails closed.
+ENV_REDACTION_PATTERNS = "REDACTION_PATTERNS_PATH"
 
 # Directory/path components that must never appear in a clean artifact.
 FORBIDDEN_PATH_PARTS = {
@@ -85,12 +90,21 @@ TEXT_SUFFIXES = {".py", ".md", ".yaml", ".yml", ".json", ".txt", ".cfg", ".ini",
 @dataclass(frozen=True)
 class ScanFinding:
     path: str
-    kind: str   # forbidden_path | forbidden_filename | label | secret
+    kind: str   # forbidden_path | forbidden_filename | label | secret | lure_token | private_pattern
     detail: str
+
+
+def _configured_private_patterns() -> tuple:
+    """Operator-private patterns from REDACTION_PATTERNS_PATH (fail closed if set-but-unreadable)."""
+    path = os.environ.get(ENV_REDACTION_PATTERNS)
+    if not path:
+        return ()
+    return load_pattern_file(path)  # missing/unreadable/invalid -> raises -> scan fails closed
 
 
 def scan_artifact(root: str | Path) -> list[ScanFinding]:
     root = Path(root).resolve()
+    private_patterns = _configured_private_patterns()
     findings: list[ScanFinding] = []
     for p in sorted(root.rglob("*")):
         rel = p.relative_to(root).as_posix()
@@ -116,6 +130,12 @@ def scan_artifact(root: str | Path) -> list[ScanFinding]:
             for srx in _SECRET_PATTERNS:
                 if srx.search(text):
                     findings.append(ScanFinding(rel, "secret", srx.pattern))
+            # Canary-shaped lure markers and configured private values must never ship in artifact
+            # content. Detail is the path/kind only — the raw value is never recorded or printed.
+            if _LURE_TOKEN_PATTERN.search(text):
+                findings.append(ScanFinding(rel, "lure_token", "canary-shaped lure marker present"))
+            if any(rx.search(text) for rx in private_patterns):
+                findings.append(ScanFinding(rel, "private_pattern", "configured private value present"))
     return findings
 
 
