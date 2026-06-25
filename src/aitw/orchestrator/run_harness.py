@@ -194,7 +194,7 @@ def _git_commit() -> str | None:
             check=True,
         )
         return out.stdout.strip()
-    except Exception:  # not a git checkout / git unavailable
+    except (OSError, subprocess.SubprocessError):  # git missing / not a checkout / nonzero exit
         return None
 
 

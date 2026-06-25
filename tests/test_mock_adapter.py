@@ -1,6 +1,5 @@
 """Tests for the deterministic mock adapter and the ReAct loop."""
 
-import json
 
 from aitw.agent.adapters.base import Message
 from aitw.agent.adapters.mock_adapter import MockAdapter

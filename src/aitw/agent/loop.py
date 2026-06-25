@@ -130,7 +130,10 @@ class AgentLoop:
             try:
                 tool_result = self.tools.call(action.tool, action.args or {})
                 outcome = "ok"
-            except Exception as exc:  # tools surface failures as observations, not crashes
+            except (LookupError, OSError, ValueError, TypeError, RuntimeError, ArithmeticError) as exc:
+                # A tool surfaces a failure as an observation, not a crash. This explicit set covers
+                # the tool layer's raises (unknown tool -> KeyError; file_io -> ValueError; plus IO /
+                # type / arithmetic faults); a genuinely unexpected error type still propagates.
                 tool_result = f"ERROR: {exc}"
                 outcome = "tool_error"
             step = Step(step_no, action.thought, action.tool, action.args or {}, tool_result, outcome)

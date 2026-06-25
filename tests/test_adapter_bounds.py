@@ -4,7 +4,6 @@ Covers error classification, bounded retry vs fail-fast, the harness mapping Ada
 specific end-telemetry outcome, and the loop's wall-clock timeout.
 """
 
-import json
 
 import pytest
 
