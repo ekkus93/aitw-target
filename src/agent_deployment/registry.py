@@ -143,9 +143,13 @@ class PolicyRegistry(ToolRegistry):
 
         # 4. Neutralize EVERY string tool output (control markers / secrets / lure tokens / registered
         # run-secrets) before it is returned to the model — no tool-name gate, so a sensitive value
-        # in any tool's result is redacted.
+        # in any tool's result is redacted. ALWAYS take the scanner's redacted text: a host pre-pass
+        # redactor (scanner / credential_guard) may strip a secret before our local scanner sees it,
+        # producing redacted text with findings=[] — the returned string is authoritative, findings
+        # is only a telemetry signal.
         if isinstance(result, str):
             redaction = self.policy.scan_output(self.ctx, "tool_result", result)
+            result = redaction.text
             if redaction.findings:
                 self.telemetry.emit(
                     phase=PHASE_SCANNER,
@@ -153,6 +157,5 @@ class PolicyRegistry(ToolRegistry):
                     tool=name,
                     redaction_count=redaction.redaction_count,
                 )
-                result = redaction.text
 
         return result

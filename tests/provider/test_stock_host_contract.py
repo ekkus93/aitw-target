@@ -244,3 +244,32 @@ def test_registered_secret_scanner_does_not_redact_inside_marker_with_multiple_s
     scanner = RegisteredSecretScanner()
     scanner.register("E", "D")
     assert scanner.scan("E D").redacted == "[REDACTED] [REDACTED]"
+
+
+# --- operator path: host pre-pass redactor with empty findings (Fix: redaction propagation) ----
+
+
+class _HostPrepassRedactor:
+    """Operator scanner/credential_guard that redacts via scan(text).redacted with empty findings —
+    the shape that previously made PolicyRegistry.call discard the redacted text."""
+
+    def scan(self, text, surface="unknown"):
+        return types.SimpleNamespace(
+            redacted=str(text).replace("OWN-PROBE-TOKEN", "[REDACTED]"),
+            findings=(),
+            redaction_count=1,
+        )
+
+
+def test_policy_registry_applies_redacted_text_even_when_findings_empty(tmp_path):
+    # Host pre-pass strips the secret before the local scanner runs, so the composite returns
+    # redacted text with findings=[]. The registry must still return the redacted text, not the raw.
+    ctx = _ctx(tmp_path, ["echo_tool"])
+    dep = Deployment()
+    host_redactor = _HostPrepassRedactor()
+    reg = dep.task_registry(ctx, scanner=host_redactor, credential_guard=host_redactor)
+    reg.register(Tool("echo_tool", "echoes", lambda args, c: "own_probe=OWN-PROBE-TOKEN"))
+
+    out = reg.call("echo_tool", {})
+    assert out == "own_probe=[REDACTED]"
+    assert "OWN-PROBE-TOKEN" not in out
