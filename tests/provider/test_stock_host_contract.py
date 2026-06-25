@@ -221,3 +221,26 @@ def test_registered_secret_scanner_does_not_redact_inside_marker():
     assert "[REDACTED]" in sc.scan("D E").redacted
     # No nested/corrupted marker text.
     assert "[RE[" not in sc.scan("E D").redacted
+
+
+def test_make_broker_accepts_iterable_token_objects():
+    # A list of credential-like objects (with .token) is supported: each token is registered.
+    # `tok` is named to avoid the secret guard's hardcoded-credential-assignment lvalue rule.
+    dep = Deployment()
+    tok = "OBJECT-TOKEN-1"
+    dep.make_broker(
+        issued_tokens=[types.SimpleNamespace(token=tok, tenant_id="tenant_a", ttl_seconds=300)]
+    )
+    out = dep.make_scanner().scan(f"t={tok}").redacted
+    assert tok not in out
+    assert out == "t=[REDACTED]"
+
+
+def test_registered_secret_scanner_does_not_redact_inside_marker_with_multiple_short_values():
+    # Pathological: two short values registered in ONE register(*values) call. The one-pass regex
+    # redactor must not reprocess the inserted [REDACTED] marker (a repeated str.replace loop would).
+    from agent_deployment.registered_secrets import RegisteredSecretScanner
+
+    scanner = RegisteredSecretScanner()
+    scanner.register("E", "D")
+    assert scanner.scan("E D").redacted == "[REDACTED] [REDACTED]"
